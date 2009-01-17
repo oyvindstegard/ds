@@ -1,0 +1,1751 @@
+#!/bin/sh
+# License: GPL version 3
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+
+# Script for easy manual synchronization of items between
+# different computers.
+# Requirements:
+# - Bourne-compatible shell (sh). GNU bash not required.
+# - rsync for file/directory sync (tested with version 3.0.3)
+# - gconftool/gconftool-2 for sync of GConf-trees (optional dependecy).
+# - ssh, preferably set up with public key authentication for remote hosts.
+#
+# Report bugs to author:
+# Øyvind Stegard <oyvind.stegard@ifi.uio.no>
+#
+# TODO documentation
+# TODO clean up IFS handling.
+# TODO consider requring BASH.
+# TODO flag dirs in config as dirs internally (easier to do the right thing with rsync)
+# $Id$
+
+# Global constants and default values.
+readonly DSYNC_VERSION=0.51beta
+readonly DSYNC_LOG_FILE=".dsync.log"
+readonly DSYNC_CONFIG_FILE=".dsync.conf"
+readonly DEBUG=
+
+# Console output functions:
+# Terminal control; emit color escape sequence or reset if no args.
+tty_color() {
+    if [ -n "$GLOPT_COLORS" ] && [ -t 1 ]; then
+        case "$1" in
+            red)    /bin/echo -en '\033[0;31m' ;;
+            green)  /bin/echo -en '\033[0;32m' ;;
+            yellow) /bin/echo -en '\033[0;33m' ;;
+            cyan)   /bin/echo -en '\033[0;36m' ;;
+            reset)  /bin/echo -en '\033[0m'    ;;
+            *) : ;;
+        esac
+    else
+        return 1
+    fi
+}
+print() {
+    echo "$@"
+}
+print_verbose() {
+    [ -n "$GLOPT_VERB" ] && print "$@"
+}
+print_red() {
+    tty_color red; print "$@"; tty_color reset
+}
+print_green() {
+    tty_color green; print "$@"; tty_color reset
+}
+print_yellow() {
+    tty_color yellow; print "$@"; tty_color reset
+}
+print_cyan() {
+    tty_color cyan; print "$@"; tty_color reset
+}
+print_err() {
+    print_red -n "E: "
+    print "$@"
+}
+print_warn() {
+    print_yellow -n "W: "
+    print "$@"
+
+}
+debug() {
+    [ -z "$DEBUG" ] && return 1
+    print_cyan -n "D: "
+    print "$@"
+}
+
+# Ask Yes/No/Quit interactively. Default answer is yes, and
+# yes will be auto-answered if global GLOPT_YES-variable is set.
+# If QUIT is answered, then this function will exit.
+ask_ynq() {
+    if [ -n "$GLOPT_YES" ]; then
+        print "$* [Y/n/q] y"
+        return 0
+    fi
+
+    local answer
+    read -p "$* [Y/n/q] " answer
+    case $answer in
+        y*|Y*|"")    return 0 ;;
+        q*|Q*)       print "DSync quit."; exit 2 ;;
+        *)           return 1 ;;
+    esac
+}
+
+ask_abort() {
+    ask_ynq "$*, abort ?" && print_red "DSync aborted." && exit 255
+}
+
+path_escape_compatible() {
+    echo "$1"|sed -e 's/\([ 	()"$#&]\)/\\\1/g' -e 's/\[/\\[/g' -e 's/\]/\\]/g'
+}
+# Handle files and directories
+handler_file() {
+    # Check that we have rsync
+    which rsync 1>/dev/null 2>&1 || {
+        print_err "Missing required dependency: rsync"
+        print_err "It has to be available somewhere in your PATH."
+        return 255
+    }
+    reset_ifs
+    local retval
+    local oldpwd=`pwd`
+    cd "$HOME"                # Jump to home-directory as default base-path
+    handler_file_internal "$@"
+    retval=$?
+    cd "$oldpwd"              # Jump back
+    return $retval
+}
+handler_file_internal() {
+    local opts
+    opts=$RSYNC_EXTRA_OPTS
+
+    # RSync command line opts is newline-separated. We bend over backwards to properly support file names with spaces in them, while
+    # also batching together all relative paths in a single rsync run to make things the most efficient.
+
+    [ -n "$opts" ] && print "Extra rsync options: $opts"
+
+    [ -n "$GLOPT_DRYRUN" ] && opts="$opts
+-n"
+    [ -n "$GLOPT_VERB" ] && opts="$opts
+-v"
+    [ -n "$GLOPT_COMP" ] && opts="$opts
+-z"
+    [ -n "$TARGET_DELETES" ] && opts="$opts
+--delete"
+    [ -n "$FORCE_UPDATE" ] || opts="$opts
+--update"
+
+    local relative_paths=
+    local absolute_paths=
+    local relative_paths_display=
+    while [ -n "$1" ]; do
+        case $OP in
+            push)
+                if echo $1|grep -qv ^/; then
+                    relative_paths="$relative_paths
+$1"
+                    [ -z "$relative_paths_display" ] && relative_paths_display=$1 || relative_paths_display="$relative_paths_display, $1"
+                    
+                else
+                    absolute_paths="$absolute_paths
+$1"
+                fi
+                ;;
+
+            fetch)
+                local escaped_path
+                if echo $1|grep -qv ^/; then
+                    escaped_path=`path_escape_compatible "$1"`
+                    relative_paths="$relative_paths
+$HOST:$escaped_path"
+                    [ -z "$relative_paths_display" ] && relative_paths_display=$1 || relative_paths_display="$relative_paths_display, $1"
+                else
+                    absolute_paths="$absolute_paths
+$1"
+                fi
+                ;;
+        esac
+        shift
+    done
+
+    local errors= retcode
+    # FIXME: --protect-args is only compatible with recent rsync versions, work-around by escaping instead :(
+    case $OP in
+        push)
+            if [ -n "$relative_paths" ]; then
+                print "Pushing to remote host $HOST:" $relative_paths_display
+                newline_ifs
+#                rsync --protect-args --relative --no-implied-dirs --archive $opts $relative_paths "$HOST:." # dot(.) after HOST: is work-around for rsync-bug.
+                rsync  --relative --no-implied-dirs --archive $opts $relative_paths "$HOST:"
+                retcode=$?
+                reset_ifs
+                if [ $retcode -eq 23 ]; then
+                    print_err "handler_file: some files or dirs do not exist locally"
+                    log_hook "rsync failed with error $retcode (some files not found locally, path list: $relative_paths_display)"
+                    errors=1
+                elif [ $retcode -ne 0 ]; then
+                    print_err "handler_file: rsync exited with non-zero exit code: $retcode (path list: $relative_paths_display)"
+                    log_hook "rsync failed with error $retcode"
+                    errors=1
+                fi
+            fi
+
+            if [ -n "$absolute_paths" ]; then
+                local abspath abspath_escape
+                newline_ifs
+                for abspath in $absolute_paths; do
+                    print "Pushing $abspath to remote host $HOST:$abspath"
+#                    rsync --protect-args --archive $opts $abspath "$HOST:$abspath" # rsync --protect-args only available in recent versions
+                    abspath_escaped=`path_escape_compatible "$abspath"`
+                    rsync --archive $opts $abspath "$HOST:$abspath_escaped"
+                    retcode=$?
+                    if [ $retcode -eq 23 ]; then
+                        print_err "handler_file: file or dir does not exist locally: $abspath"
+                        log_hook "rsync failed with error $retcode (some files not found locally)"
+                        errors=1
+                    elif [ $retcode -ne 0 ]; then
+                        print_err "handler_file: rsync exited with non-zero exit code: $retcode "
+                        log_hook "rsync failed with error $retcode"
+                        errors=1
+                    fi
+                done
+                reset_ifs
+            fi
+
+            if [ -z "$errors" ]; then
+                print_green OK
+                log_hook "OK"
+                return 0
+            else
+                return 1
+            fi
+            ;;
+
+        fetch)
+            if [ -n "$relative_paths" ]; then
+                print "Fetching from remote host $HOST:" $relative_paths_display
+                newline_ifs
+#                rsync --protect-args --relative --no-implied-dirs --archive $opts $relative_paths .
+                rsync --relative --no-implied-dirs --archive $opts $relative_paths .
+                retcode=$?
+                reset_ifs
+                if [ $retcode -eq 23 ]; then
+                    print_err "handler_file: some files or dirs do not exist remotely"
+                    log_hook "rsync failed with error $retcode (some files not found on remote host, path list: $relative_paths_display)"
+                    errors=1
+                elif [ $retcode -ne 0 ]; then
+                    print_err "handler_file: rsync exited with non-zero exit code: $retcode"
+                    log_hook "rsync failed with error $retcode (path list: $relative_paths_display)"
+                    errors=1
+                fi
+            fi
+
+            if [ -n "$absolute_paths" ]; then
+                local abspath errors abspath_escaped
+                newline_ifs
+                for abspath in $absolute_paths; do
+                    print "Fetching $abspath from remote host $HOST:$abspath"
+#                    rsync --protect-args --archive $opts "$HOST:$abspath" "$abspath"
+                    abspath_escaped=`path_escape_compatible "$abspath"`
+                    rsync --archive $opts "$HOST:$abspath_escaped" "$abspath"
+                    retcode=$?
+                    if [ $retcode -eq 23 ]; then
+                        print_err "handler_file: file or dir does not exist remotely: $abspath"
+                        log_hook "$file, rsync failed with error $retcode (path $abspath not found remote host)"
+                        errors=1
+                    elif [ $retcode -ne 0 ]; then
+                        print_err "handler_file: rsync exited with non-zero exit code: $retcode "
+                        log_hook "$file, rsync failed with error $retcode (path $abspath)"
+                        errors=1
+                    fi
+                done
+                reset_ifs
+            fi
+
+            if [ -z "$errors" ]; then
+                print_green OK
+                log_hook "OK"
+                return 0
+            else
+                return 1
+            fi
+            ;;
+        *)
+            return 2
+            ;;
+    esac
+}
+
+# Handle GConf-trees
+handler_gconf() {
+    reset_ifs
+
+    # Check that we have gconftool or gconftool locally at least.
+    which gconftool 1>/dev/null 2>&1 || {
+        print_err "Missing required dependency for GConf-sync: gconftool"
+        print_err "It has to be available somewhere in your PATH."
+        return 255
+    }
+
+    local tree=$1
+
+    local sshopts=
+    [ -n "$GLOPT_COMP" ] && sshopts="-C"
+
+    case $OP in
+        push)
+            # Transfer GConf tree to remote host
+            print "Transferring GConf-tree $tree to remote host $HOST"
+
+            if [ -z "$GLOPT_DRYRUN" ]; then
+                gconftool --dump "$tree" | ssh $sshopts $HOST gconftool --load -
+            else
+                print 'handler_gconf: Dry run mode, would execute:'
+                print "gconftool --dump \"$tree\" | ssh $sshopts $HOST \"gconftool --load -\""
+            fi
+            if [ $? -ne 0 ]; then
+                print_err "handler_gconf: failed to send GConf-data to host $HOST"
+                log_hook "GConf-tree $tree, failed to send data"
+                return 1
+            fi
+
+            log_hook "GConf-tree $tree, OK"
+            return 0
+            ;;
+
+        fetch)
+            # Load GConf-tree from remote host to local
+            print "Retrieving GConf-tree $tree from remote host $HOST .."
+            if [ -z "$GLOPT_DRYRUN" ]; then
+                ssh $sshopts $HOST "gconftool --dump $tree" | gconftool --load -
+            else
+                print 'handler_gconf: Dry run mode, would execute:'
+                print "ssh $sshopts $HOST \"gconftool --dump $tree\" | gconftool --load -"
+            fi
+            if [ $? -ne 0 ]; then
+                print_err "handler_gconf: failed to retrieve and load GConf-data from remote host $HOST"
+                log_hook "GConf '$tree', failed to retreive data"
+                return 1
+            fi
+
+            log_hook "GConf-tree $tree, OK"
+            return 0
+            ;;
+        *)
+            return 2
+            ;;
+    esac
+}
+
+# Execute sync
+# Arg 1-n: items (must be pre-validated)
+do_command_sync() {
+    local item
+
+    for item in $*; do
+        CURRENT_ITEM=$item
+        print
+        print -n 'Current item: '; print_cyan $item
+        print
+        if item_flag_value $item always_ask; then
+            if [ $OP = push ] && ! ask_ynq "Push item $item to host $HOST ?"; then
+                continue
+            fi
+            if [ $OP = fetch ] && ! ask_ynq "Fetch item $item from host $HOST ?"; then
+                continue
+            fi
+        fi
+
+        # Do preconditions first
+        if item_has_conds $item; then
+            local cond
+            newline_ifs
+            for cond in `list_item_conds $item`; do
+                reset_ifs
+                local output retval
+                output=`eval "$cond"`
+                retval=$?
+                [ -z "$output" ] && output=$cond
+                if [ $retval -ne 0 ]; then
+                    print_warn "Item pre-condition failed:"; print "$output"; print
+                    ask_ynq "Do you wish to skip this item ?"
+                    if [ $? -eq 0 ]; then
+                        continue 2
+                    fi
+                    # Continue evaluating the rest of the pre-conditions, anyway ..
+                fi
+            done
+        fi
+
+        # Do any kills
+        if item_has_kills $item; then
+            newline_ifs
+            ask_kill_local_remote `list_item_kills $item`
+            reset_ifs
+        fi
+
+        # Set any special RSync options for the item
+        unset RSYNC_EXTRA_OPTS
+        if item_has_rsync_opts $item; then
+            RSYNC_EXTRA_OPTS=`list_item_rsync_opts $item`
+        fi
+
+        # Set up any flags
+        unset TARGET_DELETES
+        if item_flag_effective_value $item target_deletes && [ -z "$GLOPT_ONLY_UPDATE" ]; then
+            TARGET_DELETES=1
+        fi
+
+        unset FORCE_UPDATE
+        if item_flag_effective_value $item force_update && [ -z "$GLOPT_ONLY_UPDATE" ]; then
+            FORCE_UPDATE=1
+        fi
+
+        # Do files/dirs
+        if item_has_files $item; then
+            newline_ifs
+            handler_file `list_item_files $item`
+            if [ $? -ne 0 ]; then
+                print_warn "File handler reported errors while syncing item files"
+            fi
+            reset_ifs
+        fi
+
+        # Do GConf-trees
+        if item_has_gconf_trees $item; then
+            local tree
+            newline_ifs
+            for tree in `list_item_gconf_trees $item`; do
+                reset_ifs
+                handler_gconf "$tree"
+                if [ $? -ne 0 ]; then
+                    print_warn "Sync of GConf tree $tree failed"
+                fi
+            done
+        fi
+    done
+}
+
+ask_kill_local_remote() {
+    reset_ifs
+    local local_pids=
+    local remote_pids=
+    local username=$USER
+    if echo $HOST|grep -q '@'; then
+        username="`echo $HOST|cut -d@ -f1`"
+    fi
+
+    local pids= pid
+    while [ -n "$1" ]; do
+        pids=`pgrep -f -U $USER "$1"` && { for pid in $pids; do local_pids="$local_pids $pid"; done; }
+        pids=`ssh $HOST "pgrep -f -U $username '$1'"` && { for pid in $pids; do remote_pids="$remote_pids $pid"; done; }
+        shift
+    done
+
+    local_pids="${local_pids## }"
+    remote_pids="${remote_pids## }"
+
+    if [ -n "$local_pids" ]; then
+        print_warn "Processes associated with item $CURRENT_ITEM found running locally:"
+        ps -p "$local_pids" -o pid,cmd
+        print
+        if ask_ynq "Kill them before sync ?"; then
+            kill $local_pids && sleep 3 || ask_abort "Failed to kill local processes associated with item $CURRENT_ITEM"
+        fi
+    fi
+
+    if [ -n "$remote_pids" ]; then
+        print_warn "Processes associated with item $CURRENT_ITEM found running remotely:"
+        ssh $HOST "ps -p '$remote_pids' -o pid,cmd"
+        print
+        if ask_ynq "Kill them before sync ?"; then
+            ssh $HOST kill $remote_pids && sleep 3 || ask_abort "Failed to kill remote processes associated with item $CURRENT_ITEM"
+        fi
+    fi
+}
+
+
+log_hook() {
+    [ -n "$GLOPT_DRYRUN" ] && return 0 # Log nothing for dry-runs
+    local message
+    message=$1
+
+    [ -n "$message" ] && message=", $message"
+    case $OP in
+        push)
+            echo "`date +'%Y-%m-%d %H:%M'` -->     PUSH item $CURRENT_ITEM to host $HOST$message" >> "$HOME/$DSYNC_LOG_FILE"
+
+            # Update remote dsync log file
+            echo "`date +'%Y-%m-%d %H:%M'`     <-- REMOTE_PUSH from host `hostname`, item $CURRENT_ITEM$message" |\
+                 ssh $HOST "cat - >> $DSYNC_LOG_FILE"
+            if [ $? -ne 0 ]; then
+                print_warn "Failed to update remote dsync log file"
+            fi
+            ;;
+
+        fetch)
+            echo "`date +'%Y-%m-%d %H:%M'`     <-- FETCH item $CURRENT_ITEM from host $HOST$message" >> "$HOME/$DSYNC_LOG_FILE"
+
+            # Update remote dsync log file
+            echo "`date +'%Y-%m-%d %H:%M'` -->     REMOTE_FETCH from host `hostname`, item $CURRENT_ITEM$message" |\
+                 ssh $HOST "cat - >> $DSYNC_LOG_FILE"
+            if [ $? -ne 0 ]; then
+                print_warn "Failed to update remote dsync log file"
+            fi
+            ;;
+    esac
+}
+
+do_command_log() {
+    if [ -n "$LOG_CLEAR" ]; then
+        # Clear logfile requested
+        if [ -n "$HOST" ]; then
+            print "Clearing DSync log file ~/$DSYNC_LOG_FILE on remote host $HOST .."
+            ssh $HOST 'test -f $DSYNC_LOG_FILE'
+            if [ $? -ne 0 ]; then
+                print_err "DSync log file not found on remote host $HOST."
+                return 1
+            else
+                ssh $HOST "echo -n > $DSYNC_LOG_FILE"
+                [ $? -ne 0 ] && print_err "Failed to clear DSync log file on remote host $HOST" && return 1
+                return 0
+            fi
+        else
+            print "Clearing DSync log file ~/$DSYNC_LOG_FILE .."
+            if [ -f "$HOME/$DSYNC_LOG_FILE" ]; then
+                echo -n > "$HOME/$DSYNC_LOG_FILE"
+                [ $? -ne 0 ] && print_err "Failed to clearn DSync log file." && return 1
+                return 0
+            else
+                print_warn "No DSync log file found."
+                return 1
+            fi
+        fi
+    fi
+
+    local regexp="^`date +'%Y-%m-%d'`|^`date --date='-1 day' +'%Y-%m-%d'`|^`date --date='-2 days' +'%Y-%m-%d'`"
+
+    [ -n "$LOG_REGEXP" ] && regexp=$LOG_REGEXP
+    [ -n "$LOG_ALL" ] && regexp=
+
+    if [ -n "$HOST" ]; then
+        print "DSync log on remote host: $HOST"
+        print
+        ssh $HOST grep -E \'$regexp\' $DSYNC_LOG_FILE || echo No log entries on host $HOST matched \'$regexp\'
+        case $? in
+            0|1)
+                # OK
+                return 0
+                ;;
+            2)
+                print_warn "DSync log file ~/$DSYNC_LOG_FILE not found on remote host $HOST."
+                return 1
+                ;;
+            255)
+                print_err "Could not connect to host $HOST"
+                return 1
+                ;;
+            *)
+                print_err "Unknown error while getting DSync log file on remote host $HOST"
+                return 1
+                ;;
+        esac
+    else
+        grep -E "$regexp" "$HOME/$DSYNC_LOG_FILE" || print "No log entries matched '$regexp'"
+        if [ $? -eq 2 ]; then
+            print_warn "DSync log file ~/$DSYNC_LOG_FILE not found."
+            return 1
+        fi
+    fi
+
+    return 0
+}
+
+# Bourne-shell lacks support for arrays.
+# These functions are management of list items in a single variable.
+# List elements are separated by newlines.
+_OLDIFS=$IFS
+reset_ifs() {
+    IFS=$_OLDIFS
+}
+newline_ifs() {
+    IFS='
+'
+}
+list_append() {
+    local name element current_list
+    name="$1"
+    element="$2"
+
+    eval "current_list=\$$name"
+    if [ -z "$current_list" ]; then
+        current_list="$element"
+    else
+        current_list="$current_list
+$element"
+    fi
+    eval "$name=\$current_list"
+}
+LIST_RETVAL=
+list_get() {
+    local name index current_list
+    name="$1"
+    index="$2"
+    [ -z "$index" ] && return 1 # no value for index
+    LIST_RETVAL= # clear any old value
+    eval "current_list=\$$name"
+    local IFS
+    IFS='
+'
+    local count=0
+    for element in $current_list; do
+        if [ $count -eq $index ]; then
+            LIST_RETVAL=$element
+            return 0
+        fi
+        count=$((count+1))
+    done
+    return 1
+}
+list_elements() {
+    local name
+    name="$1"
+    eval "LIST_RETVAL=\$$name"
+}
+list_size() {
+    local name current_list
+    name="$1"
+    eval "current_list=\$$name"
+    local IFS
+    IFS='
+'
+    local count=0
+    for element in $current_list; do count=$((count+1)); done
+    LIST_RETVAL=$count
+}
+# End of internal list utility functions
+
+# Functions for storing parsed configuration values:
+add_item() {
+    local name
+    name="$1"
+    list_append CONF_ITEM_LIST "$name"
+}
+list_items() {
+    list_elements CONF_ITEM_LIST
+    echo "$LIST_RETVAL"
+}
+have_items() {
+    [ -n "$CONF_ITEM_LIST" ]
+}
+
+add_item_file() {
+    local item file
+    item="$1"
+    file="$2"
+    list_append "CONF_${item}_FILE_LIST" "$file"
+}
+list_item_files() {
+    local item
+    item="$1"
+    list_elements "CONF_${item}_FILE_LIST"
+    echo "$LIST_RETVAL"
+}
+item_has_files() {
+    eval "[ -n \"\$CONF_$1_FILE_LIST\" ]"
+}
+
+add_item_gconf_tree() {
+    local item tree
+    item="$1"
+    tree="$2"
+    list_append "CONF_${item}_GCONF_LIST" "$tree"
+}
+list_item_gconf_trees() {
+    local item
+    item="$1"
+    list_elements "CONF_${item}_GCONF_LIST"
+    echo "$LIST_RETVAL"
+}
+item_has_gconf_trees() {
+    eval "[ -n \"\$CONF_${1}_GCONF_LIST\" ]"
+}
+
+add_item_kill() {
+    local item kill
+    item="$1"
+    kill="$2"
+    list_append "CONF_${item}_KILL_LIST" "$kill"
+}
+list_item_kills() {
+    local item
+    name="$1"
+    list_elements "CONF_${item}_KILL_LIST"
+    echo "$LIST_RETVAL"
+}
+item_has_kills() {
+    eval "[ -n \"\$CONF_${1}_KILL_LIST\" ]"
+}
+
+add_item_cond() {
+    local item cond
+    item="$1"
+    cond="$2"
+    list_append "CONF_${item}_COND_LIST" "$cond"
+}
+list_item_conds() {
+    local item
+    item="$1"
+    list_elements "CONF_${item}_COND_LIST"
+    echo "$LIST_RETVAL"
+}
+item_has_conds() {
+    eval "[ -n \"\$CONF_${1}_COND_LIST\" ]"
+}
+
+add_item_rsync_option() {
+    local item option
+    item="$1"
+    option="$2"
+    list_append "CONF_${item}_RSYNC_OPT_LIST" "$option"
+}
+list_item_rsync_opts() {
+    local item opts
+    item="$1"
+    list_elements "CONF_${item}_RSYNC_OPT_LIST"
+    echo "$LIST_RETVAL"
+}
+item_has_rsync_opts() {
+    eval "[ -n \"\$CONF_${1}_RSYNC_OPT_LIST\" ]"
+}
+
+set_global_flag_true() {
+    local flag
+    flag=$1
+    eval "GLOBAL_CONF_FLAG_${flag}=1"
+}
+set_global_flag_false() {
+    local flag
+    flag=$1
+    eval "GLOBAL_CONF_FLAG_${flag}=0"
+}
+global_flag_value() {
+    local flag
+    flag=$1
+    eval "[ -n \"\$GLOBAL_CONF_FLAG_${flag}\" ] && [ 1 -eq \$GLOBAL_CONF_FLAG_${flag} ]"
+}
+
+set_item_flag_true() {
+    local item flag
+    item=$1
+    flag=$2
+    eval "CONF_${item}_FLAG_${flag}=1"
+}
+set_item_flag_false() {
+    local item flag
+    item=$1
+    flag=$2
+    eval "CONF_${item}_FLAG_${flag}=0"
+}
+item_flag_value() {
+    local item flag
+    item=$1
+    flag=$2
+    eval "[ -n \"\$CONF_${item}_FLAG_${flag}\" ] && [ \$CONF_${item}_FLAG_${flag} -eq 1 ]"
+}
+item_has_flag() {
+    local item flag
+    item=$1
+    flag=$2
+    eval "[ -n \"\$CONF_${item}_FLAG_${flag}\" ]"
+}
+# Effective value means taking global value into consideration.
+item_flag_effective_value() {
+    local item flag
+    item=$1
+    flag=$2
+    if item_has_flag $item $flag; then
+        item_flag_value $item $flag
+    else
+        global_flag_value $flag
+    fi
+}
+
+# Nice and simple, but lenient config parser which does all the things a user expects.
+# Allows comments (also inline), good white-space handling, quote handling
+# and checks syntax and validity.
+unset CURRENT_ITEM
+unset CONF_GLOBAL_DEFAULT_HOST
+set_global_flag_true  target_deletes
+set_global_flag_true  force_update
+set_global_flag_false always_ask
+set_global_flag_false sync_by_default
+
+parse_configuration() {
+    local config_file
+    config_file="$1"
+
+    if [ ! -f "$config_file" ]; then
+        print_err "Configuration file not found: $config_file"
+        return 1
+    fi
+
+    local sed_script_trim
+    sed_script_trim="s/^[ 	]*//
+                     s/[ 	]*\$//
+                     /^'.*'\$/ {
+                       s/^'\(.*\)'\$/\1/
+                       q
+                     }
+                     /^\".*\"\$/ {
+                       s/^\"\(.*\)\"\$/\1/
+                     }"
+    # Split on newline, strip comments, trim whitespace and quote pairs.
+    local line keyword value
+    newline_ifs
+    for line in `sed 's/^[ 	]*\([^#]*\).*$/\1/' "$config_file"`; do
+        reset_ifs
+        [ -z "$line" ] && continue
+        keyword=${line%%[ 	]*}
+        value=`echo "$line"|sed -e "s/^[ 	]*[^ 	]*[ 	]*\(.*\)/\1/" -e "$sed_script_trim"`
+        case $keyword in
+            default_host)
+                if [ -n "$CURRENT_ITEM" ]; then
+                    print_err "Config: global option 'default_host' cannot be put in item context"
+                    return 1
+                fi
+                if [ -z "$value" ]; then
+                    print_err "Config: global option 'default_host' requires a value"
+                    return 1
+                fi
+                CONF_GLOBAL_DEFAULT_HOST=$value
+                ;;
+
+            item)
+                if ! echo $value|grep -Eq '^[a-zA-Z0-9_]+$'; then
+                    print_err "Config: Illegal or empty item name: $value"
+                    return 1
+                elif echo $value|grep -iEq '^(to|from|default)$'; then
+                    print_err "Config: Illegal item name: $value (reserved)"
+                    return 1
+                fi
+
+                CURRENT_ITEM=$value
+                add_item "$CURRENT_ITEM"
+                ;;
+
+            dir|directory)
+                if [ -z "$CURRENT_ITEM" ]; then
+                    print_err "Config: $keyword keyword with no corresponding item: $line"
+                    return 1
+                fi
+
+                if [ -z "$value" ]; then
+                    print_err "Config (item $CURRENT_ITEM): $keyword keyword requires an argument: $line "
+                    return 1
+                fi
+                if echo $value|grep -q '/$'; then
+                    add_item_file "$CURRENT_ITEM" "$value"
+                else
+                    add_item_file "$CURRENT_ITEM" "$value/"
+                fi
+                ;;
+
+            file)
+                if [ -z "$CURRENT_ITEM" ]; then
+                    print_err "Config: $keyword keyword with no corresponding item: $line"
+                    return 1
+                fi
+
+                if [ -z "$value" ]; then
+                    print_err "Config (item $CURRENT_ITEM): $keyword keyword requires an argument: $line "
+                    return 1
+                fi
+                add_item_file "$CURRENT_ITEM" "$value"
+                ;;
+
+            gconf)
+                if [ -z "$CURRENT_ITEM" ]; then
+                    print_err "Config: $keyword keyword with no corresponding item: $line"
+                    return 1
+                fi
+                if [ -z "$value" ]; then
+                    print_err "Config (item $CURRENT_ITEM): $keyword keyword requires an argument: $line"
+                    return 1
+                fi
+                add_item_gconf_tree "$CURRENT_ITEM" "$value"
+                ;;
+
+            kill)
+                if [ -z "$CURRENT_ITEM" ]; then
+                    print_err "Config: $keyword keyword with no corresponding item: $line"
+                    return 1
+                fi
+                if [ -z "$value" ]; then
+                    print_err "Config (item $CURRENT_ITEM): $keyword keyword requires an argument: $line"
+                    return 1
+                fi
+                add_item_kill "$CURRENT_ITEM" "$value"
+                ;;
+
+            precondition|cond)
+                if [ -z "$CURRENT_ITEM" ]; then
+                    print_err "Config: $keyword keyword with no corresponding item: $line"
+                    return 1
+                fi
+                if [ -z "$value" ]; then
+                    print_err "Config (item $CURRENT_ITEM): $keyword keyword requires an argument: $line"
+                    return 1
+                fi
+                add_item_cond "$CURRENT_ITEM" "$value"
+                ;;
+
+            rsync_option)
+                if [ -z "$CURRENT_ITEM" ]; then
+                    print_err "Config: $keyword keyword with no corresponding item: $line"
+                    return 1
+                fi
+                if [ -z "$value" ]; then
+                    print_err "Config (item $CURRENT_ITEM): $keyword keyword requires a single argument: $line"
+                    return 1
+                fi
+                add_item_rsync_option "$CURRENT_ITEM" "$value"
+                ;;
+
+            sync_by_default)
+                if [ -z "$CURRENT_ITEM" ]; then
+                    set_global_flag_true sync_by_default
+                else
+                    set_item_flag_true "$CURRENT_ITEM" sync_by_default
+                fi
+                ;;
+
+            no_sync_by_default)
+                if [ -z "$CURRENT_ITEM" ]; then
+                    set_global_flag_false sync_by_default
+                else
+                    set_item_flag_false "$CURRENT_ITEM" sync_by_default
+                fi
+                ;;
+
+            always_ask)
+                if [ -z "$CURRENT_ITEM" ]; then
+                    set_global_flag_true always_ask
+                else
+                    set_item_flag_true "$CURRENT_ITEM" always_ask
+                fi
+                ;;
+
+            no_always_ask)
+                if [ -z "$CURRENT_ITEM" ]; then
+                    set_global_flag_false always_ask
+                else
+                    set_item_flag_false "$CURRENT_ITEM" always_ask
+                fi
+                ;;
+
+            no_target_deletes)
+                if [ -z "$CURRENT_ITEM" ]; then
+                    set_global_flag_false                 target_deletes
+                else
+                    set_item_flag_false   "$CURRENT_ITEM" target_deletes
+                fi
+                ;;
+            target_deletes)
+                if [ -z "$CURRENT_ITEM" ]; then
+                    set_global_flag_true                  target_deletes
+                else
+                    set_item_flag_true    "$CURRENT_ITEM" target_deletes
+                fi
+                ;;
+            no_force_update)
+                if [ -z "$CURRENT_ITEM" ]; then
+                    set_global_flag_false                 force_update
+                else
+                    set_item_flag_false   "$CURRENT_ITEM" force_update
+                fi
+                ;;
+            force_update)
+                if [ -z "$CURRENT_ITEM" ]; then
+                    set_global_flag_true                 force_update
+                else
+                    set_item_flag_true   "$CURRENT_ITEM" force_update
+                fi
+                ;;
+            *)
+                print_err "Config${CURRENT_ITEM:+ (item $CURRENT_ITEM)}: unknown keyword: $keyword"
+                return 1
+                ;;
+        esac
+    done
+}
+
+do_command_conf_example() {
+    cat <<EOF
+# Example ~/$DSYNC_CONFIG_FILE
+# VERSION=2
+#
+
+# Set the default host / sync partner:
+default_host otherlaptop
+
+# Hostnames can also be specified with "user@" first:
+# default_host 'me@otherlaptop'
+
+# Uncomment this to globally disable default behaviour of forcing target updates:
+#no_force_update
+
+# Uncomment this to globally disable default behaviour of deleting files at target
+# which have been deleted at source:
+#no_target_deletes
+
+# Uncomment this to set all items to be synchronized by default (unless overridden at item level with 'no_sync_by_default'):
+#sync_by_default
+
+# Uncomment this to trigger interactive confirmation before syncing for all items:
+#always_ask
+
+# Start sync item definitions:
+
+item Foo                                          # an item named Foo
+    file foofile1                                 # add file 'foofile1' to sync item, relative to your home directory.
+    file foofile2                                 # add file 'foofile2'
+    dir foodir1/                                  # add directory 'foodir1', directories are always synchronized recursively.
+    dir foodir2                                   # add another directory 'foodir2'
+
+item Bar                                          # another item named Bar
+    file a file with spaces.txt                   # spaces in file names are OK
+    dir /site/bar/                                # absolute path to a directory
+
+
+# Now some real applications:
+
+item Firefox
+     directory .mozilla/                          # Firefox profiles
+     kill "^(/usr/lib/firefox-3.0.4/)?firefox ?"  # Killing any running Firefox before sync is important.
+                                                  # The kill pattern is a regular expression which should 
+                                                  # match the command you want killed.
+     sync_by_default                              # Want this item to be synchronized if nothing is specified on command line
+
+item Evolution
+     directory .evolution                                 # Evolution data files
+     gconf /apps/evolution                                # Evolution gconf configuration
+     kill '/usr/lib/evolution/evolution-data-server-2.24' 
+     kill '^(/usr/bin/)?evolution ?'                      # Multiple kill statements per item allowed
+     sync_by_default
+
+
+# A secure file system mounted ontop of an encrypted file:
+item SecureFS
+     file .securefs
+
+     # Preconditions are small snippets of shell code expressions which 
+     # must evaluate to true for the item sync to proceed. In this case,
+     # we must never sync the file if a file system is mounted on top of it
+     # (could corrupt file system at target):
+
+     precondition '! grep -q securefs /proc/mounts || { echo Warning: SecureFS is mounted locally \!; false; }'
+
+     # HOST variable will always be set to remote host of sync
+     # (so in this case we can also check if it is mounted remotely):
+     precondition '! ssh \$HOST grep -q securefs /proc/mounts || { echo Warning: SecureFS is mounted on remote host \$HOST \!; false; }'
+
+     rsync_option '-c'  # Need rsync checksum-comparison for this file (timestamp is never updated, even if content changes)
+     rsync_option '-vv' # Want rsync to be extra verbose for this one.
+
+
+item Emacs
+      file .emacs
+      dir  .elisp/
+      sync_by_default
+
+
+item MiscDesktop              # Miscellaneous desktop stuff
+    directory  .icons/
+    directory  .sounds/
+    directory  .avatars/
+
+    # Makes a two-way sync possible (push, then fetch or vice-versa):
+    no_target_deletes              # Override/disable global option 'target_deletes' only for this item.
+    no_force_update                # Override/disable gloabl option 'force_update' for only this item.
+
+item FontConfig
+    directory  .fonts/
+    file .fonts.conf
+    no_sync_by_default          # Never sync this item by default
+
+
+# The DSync shell script itself:
+item DSync
+file bin/dsync
+no_sync_by_default
+
+
+item SSHConfig
+  file .ssh/config
+  no_sync_by_default
+  no_force_update  # Override/disable global option 'force_update' only for this item.
+
+
+# End of file.
+EOF
+}
+
+do_command_bashcomp() {
+    print '# Context-sensitive DSync command line auto-completion BASH code'
+    print '__DSYNC_COMP_ITEMS='
+    print '_dsync_completion() {'
+    print "    local dsync_config_file=\"\$HOME/$DSYNC_CONFIG_FILE\""
+    cat <<"EOF"
+    if [ -z "$__DSYNC_COMP_ITEMS" ] && [ -f "$dsync_config_file" ]; then
+        local item
+        for item in $(awk '/^[ 	]*item[ 	]*/ { print tolower($2); }' < "$dsync_config_file"); do
+            __DSYNC_COMP_ITEMS="$__DSYNC_COMP_ITEMS $item"
+        done
+    fi
+
+    local COMMANDS="push fetch conf log bashcomp"
+    local OPTIONS="--interactive --yes --compression --only-update --dry --color --verbose"
+    local state=first cursorstate= j=0 word
+    for word in "${COMP_WORDS[@]}"; do
+        [ $j = $COMP_CWORD ] && cursorstate=$state # cursor-state (current word)
+        case $state in
+            first)
+                # move on to options_or_command state
+                state=options_or_command
+                ;;
+            options_or_command)
+                if [ -n "$word" ] && [ "${word:0:1}" = - ]; then
+                    # option word
+                    local option= o
+                    for o in $OPTIONS; do
+                        if [ "$word" = "$o" ]; then
+                            option=$word
+                            break
+                        fi
+                    done
+
+                    local provided_options
+                    if [ -n "$option" ] && [ $j -ne $COMP_CWORD ]; then
+                        provided_options="$provided_options $option"
+                    fi
+                elif [ -n "$word" ]; then
+                    local command= c
+                    for c in $COMMANDS; do
+                        if [ "$word" = "$c" ]; then
+                            command=$word
+                            break
+                        fi
+                    done
+
+                    if [ -n "$command" ]; then
+                        state=$command
+                    else
+                        # no valid command present, break here
+                        break
+                    fi
+                fi
+                ;;
+            push)
+                if [ -n "$word" ]; then
+                    if [ "$word" = to ]; then
+                        [ -z "$host" ] && state=host || break
+                    else
+                        local item= i
+                        for i in $__DSYNC_COMP_ITEMS; do
+                            if [ "$word" = "$i" ]; then
+                                item=$word
+                                break
+                            fi
+                        done
+
+                        local provided_items
+                        if [ -n "$item" ] && [ $j -ne $COMP_CWORD ]; then
+                            provided_items="$provided_items $item"
+                        fi
+                    fi
+                fi
+                ;;
+            fetch)
+                if [ -n "$word" ]; then
+                    if [ "$word" = from ]; then
+                        [ -z "$host" ] && state=host || break
+                    else
+                        local item= i
+                        for i in $__DSYNC_COMP_ITEMS; do
+                            if [ "$word" = "$i" ]; then
+                                item=$word
+                                break
+                            fi
+                        done
+
+                        local provided_items
+                        if [ -n "$item" ] && [ $j -ne $COMP_CWORD ]; then
+                            provided_items="$provided_items $item"
+                        fi
+                    fi
+                fi
+                ;;
+            log)
+                if [ -n "$word" ]; then
+                    local logarg_all logarg_clear
+                    case $word in
+                        all) logarg_all=1 ;;
+                        clear) logarg_clear=1 ;;
+                        remote)
+                            [ -z "$host" ] && state=host || break ;;
+                        match)
+                            [ -z "$matchregexp" ] && state=logmatch || break ;;
+                        *)
+                            break ;;
+                    esac
+                fi
+                ;;
+            logmatch)
+                [ -z "$word" ] && break
+                local matchregexp
+                matchregexp=$word
+                state=log
+                ;;
+            conf)
+                break # only zero or one argument
+                ;;
+            bashcomp)
+                break # command takes no arguments
+                ;;
+            host)
+                local host
+                if [ -n "$word" ]; then
+                    host=$word
+                    state=$command
+                fi
+                ;;
+        esac
+        j=$((j+1))
+    done
+
+    # Now do completion based on cursor context and rest of state
+    COMPREPLY=()
+    case $cursorstate in
+        options_or_command)
+            local options= o
+            for o in $OPTIONS; do
+                local provided_option
+                for provided_option in $provided_options; do
+                    [ "$provided_option" = "$o" ] && continue 2
+                done
+                options="$options $o"
+            done
+
+            if [ -z "$command" ]; then
+                COMPREPLY=($(compgen -W "$options $COMMANDS" -- ${COMP_WORDS[COMP_CWORD]}))
+            else
+                COMPREPLY=($(compgen -W "$options" -- ${COMP_WORDS[COMP_CWORD]}))
+            fi
+            ;;
+
+        push)
+            local items= i
+            for i in $__DSYNC_COMP_ITEMS; do
+                local provided_item
+                for provided_item in $provided_items; do
+                    [ "$provided_item" = "$i" ] && continue 2
+                done
+                items="$items $i"
+            done
+
+            if [ -z "$host" ]; then
+                COMPREPLY=($(compgen -W "$items to" -- ${COMP_WORDS[COMP_CWORD]}))
+            else
+                COMPREPLY=($(compgen -W "$items" -- ${COMP_WORDS[COMP_CWORD]}))
+            fi
+            ;;
+
+        fetch)
+            local items= i
+            for i in $__DSYNC_COMP_ITEMS; do
+                local provided_item
+                for provided_item in $provided_items; do
+                    [ "$provided_item" = "$i" ] && continue 2
+                done
+                items="$items $i"
+            done
+
+            if [ -z "$host" ]; then
+                COMPREPLY=($(compgen -W "$items from" -- ${COMP_WORDS[COMP_CWORD]}))
+            else
+                COMPREPLY=($(compgen -W "$items" -- ${COMP_WORDS[COMP_CWORD]}))
+            fi
+            ;;
+
+        conf)
+            COMPREPLY=($(compgen -W "example" -- ${COMP_WORDS[COMP_CWORD]}))
+            ;;
+        log)
+            local logargs=
+            [ -n "$logarg_all" ] && [ -n "$logarg_clear" ] && return # invalid combo
+            [ -n "$logarg_all" ] && [ -n "$matchregexp" ] && return  # invalid combo
+            [ -n "$logarg_clear" ] && [ -n "$matchregexp" ] && return # invalid combo
+            if [ -n "$logarg_clear" ] || [ -n "$logarg_all" ] || [ -n "$matchregexp" ]; then
+                [ -z "$host" ] && logargs="remote"
+            else
+                [ -z "$host" ] && logargs="remote"
+                logargs="$logargs all clear match"
+            fi
+            COMPREPLY=($(compgen -W "$logargs" -- ${COMP_WORDS[COMP_CWORD]}))
+            ;;
+        host)
+            if [ -f ~/.ssh/config ]; then
+                # Complete on hosts found in ~/.ssh/config
+                local hosts= host
+                for host in $(awk '/^[ 	]*host[ 	]/ {for (i=2; i<=NF; i++) { printf("%s ",$i)}}' < ~/.ssh/config); do
+                    hosts="$hosts $host"
+                done
+                COMPREPLY=($(compgen -W "$hosts" -- ${COMP_WORDS[COMP_CWORD]}))
+            fi
+            ;;
+        logmatch) : ;;
+        bashcomp) : ;;
+    esac
+}
+EOF
+    print "complete -F _dsync_completion $(basename $0)"
+    print '# End of Dsync command line auto-completion code.'
+}
+
+do_command_conf() {
+    print DSync configuration
+    print
+
+    if [ -n "$CONF_GLOBAL_DEFAULT_HOST" ]; then
+        print_green -n "Default host/sync partner: "; print "$CONF_GLOBAL_DEFAULT_HOST"
+        print
+    fi
+
+    local default_items=
+    newline_ifs
+    for item in `list_items`; do
+        reset_ifs
+        item_flag_effective_value $item sync_by_default && default_items="$default_items $item"
+    done
+    if [ -n "$default_items" ]; then
+        print_green -n "Default items: "
+        local first=1
+        for item in $default_items; do
+            [ -n "$first" ] || print -n ", " && first=
+            print_cyan -n $item
+        done
+        print
+    else
+        print_green "No items will be synchronized by default."
+    fi
+    print
+
+    if ! global_flag_value force_update; then
+        print_green -n "Global setting: "
+        print "'no_force_update'"
+        print "Target files will only be updated if source file is newer."
+        print
+    fi
+    if ! global_flag_value target_deletes; then
+        print_green -n "Global setting: "
+        print "'no_target_deletes'"
+        print "No files will be deleted from target directory trees, even if deleted at source."
+        print
+    fi
+    if global_flag_value sync_by_default; then
+        print_green -n "Global setting: "
+        print "'sync_by_default'"
+        print "All items will be processed by default if no items are specified on the command line."
+        print
+    fi
+    if global_flag_value always_ask; then
+        print_green -n "Global setting: "
+        print "'always_ask'"
+        print "Enabled Interactive confirmation before syncing for all items."
+        print
+    fi
+
+    if ! have_items; then
+        print "No items are configured."
+        return 0
+    fi
+
+    newline_ifs
+    for item in `list_items`; do
+        print_cyan "Item $item"
+
+        local file kill cond tree
+        for file in `list_item_files $item`; do
+            print "  $file"
+        done
+
+        for tree in `list_item_gconf_trees $item`; do
+            print_yellow -n "  GConf-tree  "; print "$tree"
+        done
+
+        for kill in `list_item_kills $item`; do
+            print_red -n "  Kill "
+            print "processes matching  '$kill'"
+        done
+
+        for cond in `list_item_conds $item`; do
+            print "  Precondition  '$cond'"
+        done
+
+        for option in `list_item_rsync_opts $item`; do
+            print "  Extra rsync option  '$option'"
+        done
+
+        if item_has_flag $item force_update; then
+            if item_flag_value $item force_update; then
+                print "  Forced updates enabled for item (option force_update)"
+            else
+                print "  Forced updates disabled for item (option no_force_update)"
+            fi
+        fi
+
+        if item_has_flag $item target_deletes; then
+            if item_flag_value $item target_deletes; then
+                print "  Target deletes enabled for item (option target_deletes)"
+            else
+                print "  Target deletes disabled for item (option no_target_deletes)"
+            fi
+        fi
+
+        if item_has_flag $item sync_by_default; then
+            if item_flag_value $item sync_by_default; then
+                print "  Item is set to be synchronized by default (option sync_by_default)."
+            else
+                print "  Item is never synchronized by default (option no_sync_by_default)."
+            fi
+        fi
+
+        if item_has_flag $item always_ask; then
+            if item_flag_value $item always_ask; then
+                print "  Item always triggers interactive confirmation (option always_ask)"
+            else
+                print "  Item never triggers interactive configuration (option no_always_ask)"
+            fi
+        fi
+        print
+    done
+    reset_ifs
+}
+
+usage() {
+    print "DSync v$DSYNC_VERSION"
+    print
+    print "DSync is a command line tool for manual, but quick and easy one-way syncing/mirroring"
+    print "of data to/from remote hosts. It uses rsync(1), ssh(1) and gconftool(1) to accomplish"
+    print "its tasks."
+    print
+    print -n "Use: `basename $0`"; print_green -n " [global options] "
+    print_cyan -n "COMMAND"
+    print " [command-args]"
+    print
+    print "Commands:"
+    print_cyan -n "push  "
+    print "[to [USER@]HOST] [ITEM1 ITEM2 [..]]"
+    print "      Synchronize by pushing items to remote host."
+    print
+    print_cyan -n "fetch "
+    print "[from [USER@]HOST] [ITEM1 ITEM2 [..]]"
+    print "      Synchronize by fetching items from remote host."
+    print
+    print -n "      If no host is specified for "; print_cyan -n push; print -n " or "; print_cyan -n fetch; 
+    print " the configured default-"
+    print "      host will be used."
+    print -n "      If no items are specified for "; print_cyan -n push; print -n " or "; print_cyan -n fetch
+    print ", then all default items are processed."
+    print "      Specified item names are matched case-insensitively and you can use simple"
+    print "      regular expressions, like in grep(1)."
+    print
+    print "      The standard behaviour of DSync is to mirror the source at the target."
+    print "      This implies two important things:"
+    print "      1) If a file has been deleted from a directory tree at the source, it will"
+    print "         also be deleted at the target."
+    print "      2) Even files that are newer at the target will be update from source files."
+    print
+    print "      This behaviour ensures consistent/identical data on both ends after"
+    print "      a sync, which is suitable for application configuration directories, etc."
+    print
+    print "      If you would like to do two-way syncing for some items, you can override this"
+    print "      default behaviour by setting the options 'no_target_deletes' and 'no_force_update'"
+    print "      in the item configuration. You can then accomplish two-way syncing by first doing"
+    print -n "      a 'push', then a 'fetch'. Or you can supply the "; print_green -n "global option "; print "'--only-update'"
+    print "      when invoking dsync from the command line, which will enable this behaviour"
+    print "      (and override anything set in config) for that run."
+    print
+    print_cyan -n "log   "
+    print "[all] [match REGEXP] [clear] [remote [[USER@]HOST]]"
+    print "      Shows  entries from the local (or remote) DSync log file."
+    print "      By default, only entries for the last three days are shown. You can optionally specify"
+    print "      'all', which will show all entries, or 'match REGEXP', which will show all entries"
+    print "      matching a given regular expression."
+    print "      If 'clear' is specified, then the DSync log file is cleared of all entries."
+    print "      If a remote host is specified, then the DSync log on that host is operated upon."
+    print
+    print_cyan -n "conf  "; print "[example]"
+    print "      Parses and lists current configuration."
+    print "      If 'example' is specified, then a DSync example configuration file"
+    print "      is printed to standard out."
+    print
+    print_cyan "bashcomp"
+    print "      This special command emits BASH script code for supporting DSync"
+    print "      command line auto-completion. You can put the output in a file and"
+    print "      source it from ~/.bashrc or equivalent."
+    print
+    print_green "Global options:"
+    print "-i, --interactive  Ask before syncing each item."
+    print "-Y, --yes          Automatically answer YES to all interactive questions."
+    print "-z, --compression  Use compression for data-transfers to/from remote host."
+    print "-u, --only-update  Disable options 'force_update' and 'target_deletes'"
+    print "                   for all items regardless of what is set in config."
+    print "-n, --dry          Enable dry-run mode. Useful to see what rsync would do."
+    print "-c, --color        Enable colors in terminal output."
+    print "-v, --verbose      Display verbose output."
+    print
+    print `echo 'Report bugs to Øyvind Stegard <oyvind.stegard@ifi.uio.no>.'|iconv -f utf-8`
+    exit 255
+}
+
+trap 'echo && echo DSync interrupted, quitting. && exit 255' INT
+
+GLOPT_YES=
+GLOPT_INT=
+GLOPT_VERB=
+GLOPT_COMP=
+GLOPT_COLORS=
+GLOPT_DRYRUN=
+GLOPT_ONLY_UPDATE=
+while [ -n "$1" ]; do
+    case $1 in
+        -Y|--yes) GLOPT_YES=1 ;;
+        -i|--interactive) GLOPT_INT=1 ;;
+        -v|--verbose) GLOPT_VERB=1 ;;
+        -z|--compression) GLOPT_COMP=1 ;;
+        -c|--color) GLOPT_COLORS=1 ;;
+        -d|--dry) GLOPT_DRYRUN=1 ;;
+        -u|--only-update) GLOPT_ONLY_UPDATE=1 ;;
+        --*)
+            print_err "Invalid option: '$1'"
+            usage ;;
+        -*)
+            # Handle grouped options here
+            echo $1|grep -Fq Y && GLOPT_YES=1
+            echo $1|grep -Fq i && GLOPT_INT=1
+            echo $1|grep -Fq v && GLOPT_VERB=1
+            echo $1|grep -Fq z && GLOPT_COMP=1
+            echo $1|grep -Fq c && GLOPT_COLORS=1
+            echo $1|grep -Fq d && GLOPT_DRYRUN=1
+            echo $1|grep -Fq u && GLOPT_ONLY_UPDATE=1
+            echo $1|grep -Eqv '^-([Yivzcdu]){1,7}$' && { print_err "Invalid option: '$1'"; usage; }
+            ;;
+        *)
+            # End of global options
+            break ;;
+    esac
+    shift
+done
+
+COMMAND=
+SELECTED_ITEMS=
+HOST=
+LOG_CLEAR=
+LOG_REMOTE=
+LOG_REGEXP=
+LOG_ALL=
+
+# Set basedir to HOME
+cd "$HOME"
+
+# Parse and validate command
+[ -z "$1" ] && usage
+COMMAND=$1
+shift
+case "$COMMAND" in
+    push|fetch)
+        parse_configuration "$HOME/$DSYNC_CONFIG_FILE"
+        if [ $? -ne 0 ]; then
+            print_err "Failed to parse configuration."
+            exit 255
+        fi
+        if [ -n "$1" ]; then
+            while [ -n "$1" ]; do
+                case $1 in
+                    to|from)
+                        if [ "$1" = "to" ] && [ "$COMMAND" = fetch ]; then
+                            print_err "Cannot \"fetch to\" a host, did you mean \"fetch from ..\" ?"
+                            usage
+                        fi
+
+                        if [ "$1" = "from" ] && [ "$COMMAND" = push ]; then
+                            print_err "Cannot \"push from\" a host, did you mean \"push to ..\" ?"
+                            usage
+                        fi
+                        if [ -z "$2" ]; then
+                            print_err "No '[USER@]HOST' specified after 'from' or 'to'."
+                            usage
+                        fi
+                        HOST="$2"
+                        shift
+                        ;;
+                    *)
+                        SELECTED_ITEMS="$SELECTED_ITEMS $1"
+                        ;;
+                esac
+                shift
+            done
+        else
+            if ! have_items; then
+                print_err "You have not configured any items."
+                exit 2
+            fi
+
+            # Fetch or push all default items to default host
+            HOST=$CONF_GLOBAL_DEFAULT_HOST
+            SELECTED_ITEMS= # signals all default items
+        fi
+
+        # Build requested item list
+        items=
+        found=
+        if [ -n "$SELECTED_ITEMS" ]; then
+            for selected in $SELECTED_ITEMS; do
+                found=
+                newline_ifs
+                for confitem in `list_items`; do
+                    reset_ifs
+                    if echo $confitem|grep -qi "^${selected}\$"; then
+                        items="$items $confitem"
+                        found=1
+                    fi
+                done
+
+                if [ -z "$found" ]; then
+                    print_warn "No configured item matching '$selected' was found."
+                fi
+            done
+            if [ -z "$items" ]; then
+                print_err "No matching items found in configuration."
+                exit 2
+            fi
+        else  # add all default items
+            newline_ifs
+            for item in `list_items`; do
+                item_flag_effective_value $item sync_by_default && items="$items $item"
+            done
+            reset_ifs
+        fi
+
+        if [ -z "$HOST" ]; then
+            if [ -z "$CONF_GLOBAL_DEFAULT_HOST" ]; then
+                print_err "No [USER@]host specified and no default host configured."
+                usage
+            else
+                HOST=$CONF_GLOBAL_DEFAULT_HOST
+            fi
+        fi
+
+        print "Remote host: $HOST"
+        print
+        print -n "Selected items: ";
+        first=1
+        for item in $items; do
+            [ -n "$first" ] || print -n ", "; first=
+            print_cyan -n "$item"
+        done
+        print
+        OP=$COMMAND
+
+        do_command_sync $items
+        ;;
+
+    conf*)
+        if [ -n "$1" ]; then
+            if [ "$1" = example ]; then
+                do_command_conf_example
+            else
+                print_err "Unknown argument to 'conf' command: $1"
+                usage
+            fi
+        else
+            parse_configuration "$HOME/$DSYNC_CONFIG_FILE"
+            if [ $? -ne 0 ]; then
+                print_err "Failed to parse configuration."
+                exit 255
+            fi
+            do_command_conf
+        fi
+        ;;
+
+    log)
+        parse_configuration "$HOME/$DSYNC_CONFIG_FILE"
+        if [ $? -ne 0 ]; then
+            print_err "Failed to parse configuration."
+            exit 255
+        fi
+        while [ -n "$1" ]; do
+            case "$1" in
+                all) LOG_ALL=1 ;;
+                clear) LOG_CLEAR=1 ;;
+                match)
+                    if [ -z "$2" ]; then
+                        print_err "Missing regular expression after 'match'"
+                        usage
+                    fi
+                    LOG_REGEXP="$2"; shift
+                    ;;
+                remote)
+                    LOG_REMOTE=1
+                    if [ -z "$2" ]; then
+                        if [ -z "$CONF_GLOBAL_DEFAULT_HOST" ]; then
+                            print_err "Missing '[USER@]HOST' after 'remote' and no default host configured"
+                            usage
+                        else
+                            HOST=$CONF_GLOBAL_DEFAULT_HOST
+                        fi
+                    else
+                        HOST=$2; shift
+                    fi
+                    ;;
+                *)
+                    print_err "Unknown argument to 'log' command: '$1'"
+                    usage
+                    ;;
+            esac
+            shift
+        done
+        do_command_log
+        ;;
+
+    bashcomp)
+        if [ -n "$1" ]; then
+            print_err "The 'bashcomp' command does not take any arguments."
+            usage
+        fi
+        do_command_bashcomp
+        ;;
+
+    *)
+        print_err "Unknown command '$COMMAND'"; usage ;;
+    "")
+        usage ;;
+esac
+
+exit 0
