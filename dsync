@@ -1125,7 +1125,7 @@ do_command_bashcomp() {
     fi
 
     local COMMANDS="push fetch conf log bashcomp"
-    local OPTIONS="--interactive --yes --compression --only-update --dry --color --verbose"
+    local OPTIONS="--interactive --yes --compression --only-update --dry --color --verbose --version"
     local state=first cursorstate= j=0 word
     for word in "${COMP_WORDS[@]}"; do
         [ $j = $COMP_CWORD ] && cursorstate=$state # cursor-state (current word)
@@ -1459,6 +1459,11 @@ do_command_conf() {
     reset_ifs
 }
 
+version() {
+    echo "DSync v$DSYNC_VERSION by Øyvind Stegard"|iconv -f utf-8
+    exit 0
+}
+
 usage() {
     print "DSync v$DSYNC_VERSION"
     print
@@ -1533,6 +1538,7 @@ usage() {
     print "-n, --dry          Enable dry-run mode. Useful to see what rsync would do."
     print "-c, --color        Enable colors in terminal output."
     print "-v, --verbose      Display verbose output."
+    print "--version          Show version."
     print
     print `echo 'Report bugs to Øyvind Stegard <oyvind.stegard@ifi.uio.no>.'|iconv -f utf-8`
     exit 255
@@ -1549,6 +1555,7 @@ GLOPT_DRYRUN=
 GLOPT_ONLY_UPDATE=
 while [ -n "$1" ]; do
     case $1 in
+        --version) version ;;
         -Y|--yes) GLOPT_YES=1 ;;
         -i|--interactive) GLOPT_INT=1 ;;
         -v|--verbose) GLOPT_VERB=1 ;;
