@@ -444,6 +444,7 @@ ask_kill_local_remote() {
     reset_ifs
     local local_pids=
     local remote_pids=
+    local self_pid=$$ # Always avoid matching ourselves locally
     local username=$USER
     if echo $HOST|grep -q '@'; then
         username="`echo $HOST|cut -d@ -f1`"
@@ -451,7 +452,7 @@ ask_kill_local_remote() {
 
     local pids= pid
     while [ -n "$1" ]; do
-        pids=`pgrep -f -U $USER "$1"` && { for pid in $pids; do local_pids="$local_pids $pid"; done; }
+        pids=`pgrep -f -U $USER "$1"` && { for pid in $pids; do [ $pid -ne $self_pid ] && local_pids="$local_pids $pid"; done; }
         pids=`ssh $HOST "pgrep -f -U $username '$1'"` && { for pid in $pids; do remote_pids="$remote_pids $pid"; done; }
         shift
     done
