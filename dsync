@@ -19,7 +19,7 @@
 # different computers.
 # Requirements:
 # - Bourne-compatible shell (sh). GNU bash not required.
-# - rsync for file/directory sync (tested with version 3.0.3)
+# - rsync for file/directory sync (tested with version 3.0.2 and up)
 # - gconftool/gconftool-2 for sync of GConf-trees (optional dependecy).
 # - ssh, preferably set up with public key authentication for remote hosts.
 #
