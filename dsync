@@ -1108,7 +1108,7 @@ EOF
 
 do_command_bashcomp() {
     print '# Context-sensitive DSync command line auto-completion BASH code'
-    print '__DSYNC_COMP_ITEMS='
+    print '__DSYNC_COMP_ITEMS=DEFAULT'
     print '__DSYNC_CONFIG_TIMESTAMP=0'
     print '_dsync_completion() {'
     print "    local dsync_config_file=\"\$HOME/$DSYNC_CONFIG_FILE\""
@@ -1117,7 +1117,7 @@ do_command_bashcomp() {
     if [ -f "$dsync_config_file" ]; then
         local mtime=$(date -r "$dsync_config_file" +'%s')
         if [ -z "$__DSYNC_COMP_ITEMS" ] || [ $mtime -gt $__DSYNC_CONFIG_TIMESTAMP ]; then
-            __DSYNC_COMP_ITEMS=
+            __DSYNC_COMP_ITEMS=DEFAULT
             local item
             for item in $(awk '/^[ 	]*item[ 	]*/ { print tolower($2); }' < "$dsync_config_file"); do
                 __DSYNC_COMP_ITEMS="$__DSYNC_COMP_ITEMS $item"
@@ -1335,6 +1335,16 @@ EOF
     print '# End of Dsync command line auto-completion code.'
 }
 
+get_default_items() {
+    local default_items=
+    newline_ifs
+    for item in `list_items`; do
+        reset_ifs
+        item_flag_effective_value $item sync_by_default && default_items="$default_items $item"
+    done
+    echo $default_items
+}
+
 do_command_conf() {
     print DSync configuration
     print
@@ -1344,12 +1354,8 @@ do_command_conf() {
         print
     fi
 
-    local default_items=
-    newline_ifs
-    for item in `list_items`; do
-        reset_ifs
-        item_flag_effective_value $item sync_by_default && default_items="$default_items $item"
-    done
+    local default_items
+    default_items=`get_default_items`
     if [ -n "$default_items" ]; then
         print_green -n "Default items: "
         local first=1
@@ -1596,13 +1602,13 @@ case "$COMMAND" in
         if [ -n "$1" ]; then
             while [ -n "$1" ]; do
                 case $1 in
-                    to|from)
-                        if [ "$1" = "to" ] && [ "$COMMAND" = fetch ]; then
+                    to|from|TO|FROM|To|From)
+                        if { [ "$1" = "to" ] || [ "$1" = "TO" ] || [ "$1" = "To" ]; } && [ "$COMMAND" = fetch ]; then
                             print_err "Cannot \"fetch to\" a host, did you mean \"fetch from ..\" ?"
                             usage
                         fi
 
-                        if [ "$1" = "from" ] && [ "$COMMAND" = push ]; then
+                        if { [ "$1" = "from" ] || [ "$1" = "FROM" ] || [ "$1" = "From" ]; } && [ "$COMMAND" = push ]; then
                             print_err "Cannot \"push from\" a host, did you mean \"push to ..\" ?"
                             usage
                         fi
@@ -1613,6 +1619,18 @@ case "$COMMAND" in
                         HOST="$2"
                         shift
                         ;;
+
+                    default|DEFAULT|Default)
+                        local default_items item selected_item
+                        default_items=`get_default_items`
+                        for item in $default_items; do
+                            for selected_item in $SELECTED_ITEMS; do
+                                [ $item = $selected_item ] && continue 2
+                            done
+                            SELECTED_ITEMS="$SELECTED_ITEMS $item"
+                        done
+                        ;;
+
                     *)
                         SELECTED_ITEMS="$SELECTED_ITEMS $1"
                         ;;
