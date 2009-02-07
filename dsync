@@ -1108,14 +1108,21 @@ EOF
 do_command_bashcomp() {
     print '# Context-sensitive DSync command line auto-completion BASH code'
     print '__DSYNC_COMP_ITEMS='
+    print '__DSYNC_CONFIG_TIMESTAMP=0'
     print '_dsync_completion() {'
     print "    local dsync_config_file=\"\$HOME/$DSYNC_CONFIG_FILE\""
     cat <<"EOF"
-    if [ -z "$__DSYNC_COMP_ITEMS" ] && [ -f "$dsync_config_file" ]; then
-        local item
-        for item in $(awk '/^[ 	]*item[ 	]*/ { print tolower($2); }' < "$dsync_config_file"); do
-            __DSYNC_COMP_ITEMS="$__DSYNC_COMP_ITEMS $item"
-        done
+
+    if [ -f "$dsync_config_file" ]; then
+        local mtime=$(date -r "$dsync_config_file" +'%s')
+        if [ -z "$__DSYNC_COMP_ITEMS" ] || [ $mtime -gt $__DSYNC_CONFIG_TIMESTAMP ]; then
+            __DSYNC_COMP_ITEMS=
+            local item
+            for item in $(awk '/^[ 	]*item[ 	]*/ { print tolower($2); }' < "$dsync_config_file"); do
+                __DSYNC_COMP_ITEMS="$__DSYNC_COMP_ITEMS $item"
+            done
+            __DSYNC_CONFIG_TIMESTAMP=$mtime
+        fi
     fi
 
     local COMMANDS="push fetch conf log bashcomp"
