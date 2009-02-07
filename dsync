@@ -28,8 +28,6 @@
 #
 # TODO documentation
 # TODO clean up IFS handling.
-# TODO consider requring BASH.
-# TODO flag dirs in config as dirs internally (easier to do the right thing with rsync)
 # $Id$
 
 # Global constants and default values.
