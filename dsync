@@ -1399,7 +1399,7 @@ do_command_conf() {
 
     newline_ifs
     for item in `list_items`; do
-        print_cyan "Item $item"
+        print -n "Item "; print_cyan "$item"
 
         local file kill cond tree
         for file in `list_item_files $item`; do
