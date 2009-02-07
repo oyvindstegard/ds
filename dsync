@@ -1488,6 +1488,8 @@ usage() {
     print ", then all default items are processed."
     print "      Specified item names are matched case-insensitively and you can use simple"
     print "      regular expressions, like in grep(1)."
+    print "      If the item name 'DEFAULT' is specified, it means all items that are configured"
+    print "      to be synchronized by default (same as not specifying any item)."
     print
     print "      The standard behaviour of DSync is to mirror the source at the target."
     print "      This implies two important things:"
