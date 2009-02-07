@@ -33,7 +33,7 @@
 # $Id$
 
 # Global constants and default values.
-readonly DSYNC_VERSION=0.51beta
+readonly DSYNC_VERSION=0.52
 readonly DSYNC_LOG_FILE=".dsync.log"
 readonly DSYNC_CONFIG_FILE=".dsync.conf"
 readonly DEBUG=
