@@ -19,7 +19,7 @@
 # different computers.
 # Requirements:
 # - Bourne-compatible shell (sh). GNU bash not required.
-# - rsync for file/directory sync (tested with version 3.0.2 and up)
+# - rsync for file/directory sync (tested with version 3.0.3)
 # - gconftool/gconftool-2 for sync of GConf-trees (optional dependecy).
 # - ssh, preferably set up with public key authentication for remote hosts.
 #
@@ -31,7 +31,7 @@
 # $Id$
 
 # Global constants and default values.
-readonly DSYNC_VERSION=0.52
+readonly DSYNC_VERSION=0.54
 readonly DSYNC_LOG_FILE=".dsync.log"
 readonly DSYNC_CONFIG_FILE=".dsync.conf"
 readonly DEBUG=
@@ -544,7 +544,7 @@ do_command_log() {
     if [ -n "$HOST" ]; then
         print "DSync log on remote host: $HOST"
         print
-        ssh $HOST grep -E \'$regexp\' $DSYNC_LOG_FILE || echo No log entries on host $HOST matched \'$regexp\'
+        ssh $HOST grep -iE \'$regexp\' $DSYNC_LOG_FILE || echo No log entries on host $HOST matched \'$regexp\'
         case $? in
             0|1)
                 # OK
@@ -564,7 +564,7 @@ do_command_log() {
                 ;;
         esac
     else
-        grep -E "$regexp" "$HOME/$DSYNC_LOG_FILE" || print "No log entries matched '$regexp'"
+        grep -iE "$regexp" "$HOME/$DSYNC_LOG_FILE" || print "No log entries matched '$regexp'"
         if [ $? -eq 2 ]; then
             print_warn "DSync log file ~/$DSYNC_LOG_FILE not found."
             return 1
@@ -1324,7 +1324,10 @@ do_command_bashcomp() {
                 COMPREPLY=($(compgen -W "$hosts" -- ${COMP_WORDS[COMP_CWORD]}))
             fi
             ;;
-        logmatch) : ;;
+        logmatch)
+            # Complete on configured item names (for easy filtering of certain items from log)
+            COMPREPLY=($(compgen -W "$__DSYNC_COMP_ITEMS" -- ${COMP_WORDS[COMP_CWORD]}))
+            ;;
         bashcomp) : ;;
     esac
 }
@@ -1515,7 +1518,7 @@ usage() {
     print "      Shows  entries from the local (or remote) DSync log file."
     print "      By default, only entries for the last three days are shown. You can optionally specify"
     print "      'all', which will show all entries, or 'match REGEXP', which will show all entries"
-    print "      matching a given regular expression."
+    print "      matching a given regular expression (matching is case-insensitive)."
     print "      If 'clear' is specified, then the DSync log file is cleared of all entries."
     print "      If a remote host is specified, then the DSync log on that host is operated upon."
     print
