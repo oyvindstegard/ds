@@ -518,7 +518,7 @@ do_command_log() {
         local items item
         for item in `list_items`; do items="$items $item"; done
         if [ -n "$HOST" ]; then
-            print "Last op per item in DSync log on remote host: $HOST"
+            print "Last operation per item in DSync log on remote host: $HOST"
             print
             ssh $HOST "/bin/sh -c 'for item in $items; do grep -F \$item $DSYNC_LOG_FILE|tail -n1; done'" | \
                 sed 's/\(, item [a-zA-Z0-9_]*\),.*$/\1/' | \
