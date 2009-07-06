@@ -31,7 +31,7 @@
 # $Id$
 
 # Global constants and default values.
-readonly DSYNC_VERSION=0.54
+readonly DSYNC_VERSION=0.60
 readonly DSYNC_LOG_FILE=".dsync.log"
 readonly DSYNC_CONFIG_FILE=".dsync.conf"
 readonly DEBUG=
@@ -442,7 +442,6 @@ ask_kill_local_remote() {
     reset_ifs
     local local_pids=
     local remote_pids=
-    local self_pid=$$ # Always avoid matching ourselves locally
     local username=$USER
     if echo $HOST|grep -q '@'; then
         username="`echo $HOST|cut -d@ -f1`"
@@ -450,7 +449,7 @@ ask_kill_local_remote() {
 
     local pids= pid
     while [ -n "$1" ]; do
-        pids=`pgrep -f -U $USER "$1"` && { for pid in $pids; do [ $pid -ne $self_pid ] && local_pids="$local_pids $pid"; done; }
+        pids=`pgrep -f -U $USER "$1"` && { for pid in $pids; do [ $pid -ne $$ ] && local_pids="$local_pids $pid"; done; }
         pids=`ssh $HOST "pgrep -f -U $username '$1'"` && { for pid in $pids; do remote_pids="$remote_pids $pid"; done; }
         shift
     done
@@ -510,6 +509,46 @@ log_hook() {
 }
 
 do_command_log() {
+    if [ -z "$HOST" ] && [ ! -f "$HOME/$DSYNC_LOG_FILE" ]; then
+        print_warn "DSync log file ~/$DSYNC_LOG_FILE not found."
+        return 1
+    fi
+
+    if [ -n "$LOG_LASTOP" ]; then
+        local items item
+        for item in `list_items`; do items="$items $item"; done
+        if [ -n "$HOST" ]; then
+            ssh $HOST "/bin/sh -c 'for item in $items; do grep -F \$item $DSYNC_LOG_FILE|tail -n1; done'" | \
+                sed 's/\(, item [a-zA-Z0-9_]*\),.*$/\1/' | \
+                sort -k4
+            case $? in # FIXME: duplicated error handling code (look further down).
+                0|1)
+                # OK
+                    return 0
+                    ;;
+                2)
+                    print_warn "DSync log file ~/$DSYNC_LOG_FILE not found on remote host $HOST."
+                    return 1
+                    ;;
+                255)
+                    print_err "Could not connect to host $HOST"
+                    return 1
+                    ;;
+                *)
+                    print_err "Unknown error while getting DSync log file on remote host $HOST"
+                    return 1
+                    ;;
+            esac
+        else
+            local item
+            (for item in $items; do
+                grep -F " item $item " "$HOME/$DSYNC_LOG_FILE"|tail -n1
+                done) | sed 's/,.*$//' |sort -k4
+        fi
+
+        return 0
+    fi
+
     if [ -n "$LOG_CLEAR" ]; then
         # Clear logfile requested
         if [ -n "$HOST" ]; then
@@ -525,14 +564,9 @@ do_command_log() {
             fi
         else
             print "Clearing DSync log file ~/$DSYNC_LOG_FILE .."
-            if [ -f "$HOME/$DSYNC_LOG_FILE" ]; then
-                echo -n > "$HOME/$DSYNC_LOG_FILE"
-                [ $? -ne 0 ] && print_err "Failed to clearn DSync log file." && return 1
-                return 0
-            else
-                print_warn "No DSync log file found."
-                return 1
-            fi
+            echo -n > "$HOME/$DSYNC_LOG_FILE"
+            [ $? -ne 0 ] && print_err "Failed to clearn DSync log file." && return 1
+            return 0
         fi
     fi
 
@@ -565,10 +599,6 @@ do_command_log() {
         esac
     else
         grep -iE "$regexp" "$HOME/$DSYNC_LOG_FILE" || print "No log entries matched '$regexp'"
-        if [ $? -eq 2 ]; then
-            print_warn "DSync log file ~/$DSYNC_LOG_FILE not found."
-            return 1
-        fi
     fi
 
     return 0
@@ -665,7 +695,7 @@ list_item_files() {
     echo "$LIST_RETVAL"
 }
 item_has_files() {
-    eval "[ -n \"\$CONF_$1_FILE_LIST\" ]"
+    eval "[ -n \"\$CONF_${1}_FILE_LIST\" ]"
 }
 
 add_item_gconf_tree() {
@@ -1106,20 +1136,24 @@ EOF
 
 do_command_bashcomp() {
     print '# Context-sensitive DSync command line auto-completion BASH code'
-    print '__DSYNC_COMP_ITEMS=DEFAULT'
+    print '__DSYNC_COMP_ITEMS='
+    print '__DSYNC_COMP_DEFAULT_ITEMS='
     print '__DSYNC_CONFIG_TIMESTAMP=0'
     print '_dsync_completion() {'
     print "    local dsync_config_file=\"\$HOME/$DSYNC_CONFIG_FILE\""
     cat <<"EOF"
 
+    COMPREPLY=()
     if [ -f "$dsync_config_file" ]; then
         local mtime=$(date -r "$dsync_config_file" +'%s')
         if [ -z "$__DSYNC_COMP_ITEMS" ] || [ $mtime -gt $__DSYNC_CONFIG_TIMESTAMP ]; then
-            __DSYNC_COMP_ITEMS=DEFAULT
-            local item
-            for item in $(awk '/^[ 	]*item[ 	]*/ { print tolower($2); }' < "$dsync_config_file"); do
-                __DSYNC_COMP_ITEMS="$__DSYNC_COMP_ITEMS $item"
-            done
+            __DSYNC_COMP_ITEMS=
+            __DSYNC_COMP_DEFAULT_ITEMS=
+EOF
+    print "            $(basename $0) conf items 1>/dev/null 2>&1 || return # some error in config, cannot complete"
+    print "            __DSYNC_COMP_ITEMS=\$($(basename $0) conf items|grep '^Items:'|cut -d' ' -f2-)"
+    print "            __DSYNC_COMP_DEFAULT_ITEMS=\$($(basename $0) conf items|grep '^DEFAULT items:'|cut -d' ' -f3-)"
+    cat <<"EOF"
             __DSYNC_CONFIG_TIMESTAMP=$mtime
         fi
     fi
@@ -1172,7 +1206,7 @@ do_command_bashcomp() {
                         [ -z "$host" ] && state=host || break
                     else
                         local item= i
-                        for i in $__DSYNC_COMP_ITEMS; do
+                        for i in $__DSYNC_COMP_ITEMS DEFAULT; do
                             if [ "$word" = "$i" ]; then
                                 item=$word
                                 break
@@ -1192,7 +1226,7 @@ do_command_bashcomp() {
                         [ -z "$host" ] && state=host || break
                     else
                         local item= i
-                        for i in $__DSYNC_COMP_ITEMS; do
+                        for i in $__DSYNC_COMP_ITEMS DEFAULT; do
                             if [ "$word" = "$i" ]; then
                                 item=$word
                                 break
@@ -1208,10 +1242,11 @@ do_command_bashcomp() {
                 ;;
             log)
                 if [ -n "$word" ]; then
-                    local logarg_all logarg_clear
+                    local logarg_all logarg_clear logarg_lastop
                     case $word in
                         all) logarg_all=1 ;;
                         clear) logarg_clear=1 ;;
+                        lastop) logarg_lastop=1 ;;
                         remote)
                             [ -z "$host" ] && state=host || break ;;
                         match)
@@ -1245,7 +1280,6 @@ do_command_bashcomp() {
     done
 
     # Now do completion based on cursor context and rest of state
-    COMPREPLY=()
     case $cursorstate in
         options_or_command)
             local options= o
@@ -1264,53 +1298,54 @@ do_command_bashcomp() {
             fi
             ;;
 
-        push)
-            local items= i
+        push|fetch)
+            local items= i DEFAULT_provided= provided_item
             for i in $__DSYNC_COMP_ITEMS; do
-                local provided_item
                 for provided_item in $provided_items; do
                     [ "$provided_item" = "$i" ] && continue 2
+                    [ "$provided_item" = DEFAULT ] && DEFAULT_provided=1
                 done
                 items="$items $i"
             done
 
-            if [ -z "$host" ]; then
-                COMPREPLY=($(compgen -W "$items to" -- ${COMP_WORDS[COMP_CWORD]}))
-            else
-                COMPREPLY=($(compgen -W "$items" -- ${COMP_WORDS[COMP_CWORD]}))
+            if [ -n "$__DSYNC_COMP_DEFAULT_ITEMS" ]; then
+                if [ -z "$DEFAULT_provided" ]; then
+                     items="$items DEFAULT"
+                else
+                    # subtract all DEFAULT items from possible completions
+                    local items_default_filtered default_item
+                    for i in $items; do
+                        for default_item in $__DSYNC_COMP_DEFAULT_ITEMS; do
+                            [ $i = $default_item ] && continue 2
+                        done
+                        items_default_filtered="$items_default_filtered $i"
+                    done
+                    items=$items_default_filtered
+                fi
             fi
-            ;;
-
-        fetch)
-            local items= i
-            for i in $__DSYNC_COMP_ITEMS; do
-                local provided_item
-                for provided_item in $provided_items; do
-                    [ "$provided_item" = "$i" ] && continue 2
-                done
-                items="$items $i"
-            done
-
+            
             if [ -z "$host" ]; then
-                COMPREPLY=($(compgen -W "$items from" -- ${COMP_WORDS[COMP_CWORD]}))
+                local tofrom
+                [ $cursorstate = fetch ] && tofrom=from || tofrom=to
+                COMPREPLY=($(compgen -W "$items $tofrom" -- ${COMP_WORDS[COMP_CWORD]}))
             else
                 COMPREPLY=($(compgen -W "$items" -- ${COMP_WORDS[COMP_CWORD]}))
             fi
             ;;
 
         conf)
-            COMPREPLY=($(compgen -W "example" -- ${COMP_WORDS[COMP_CWORD]}))
+            COMPREPLY=($(compgen -W "example items" -- ${COMP_WORDS[COMP_CWORD]}))
             ;;
         log)
             local logargs=
-            [ -n "$logarg_all" ] && [ -n "$logarg_clear" ] && return # invalid combo
-            [ -n "$logarg_all" ] && [ -n "$matchregexp" ] && return  # invalid combo
-            [ -n "$logarg_clear" ] && [ -n "$matchregexp" ] && return # invalid combo
-            if [ -n "$logarg_clear" ] || [ -n "$logarg_all" ] || [ -n "$matchregexp" ]; then
+            [ -n "$logarg_lastop" ] && [ -n "$logarg_all$logarg_clear$matchregexp" ] && return # invalid combo
+            [ -n "$logarg_all" ] && [ -n "$logarg_clear$matchregexp$logarg_lastop" ] && return # invalid combo
+            [ -n "$logarg_clear" ] && [ -n "$matchregexp$logarg_all$logarg_lastop" ] && return # invalid combo
+            if [ -n "$logarg_clear" ] || [ -n "$logarg_all" ] || [ -n "$matchregexp" ] || [ -n "$logarg_lastop" ]; then
                 [ -z "$host" ] && logargs="remote"
             else
                 [ -z "$host" ] && logargs="remote"
-                logargs="$logargs all clear match"
+                logargs="$logargs all clear match lastop"
             fi
             COMPREPLY=($(compgen -W "$logargs" -- ${COMP_WORDS[COMP_CWORD]}))
             ;;
@@ -1346,6 +1381,21 @@ get_default_items() {
     echo $default_items
 }
 
+do_command_conf_items() {
+    local items default_items
+    items=`list_items`
+    default_items=`get_default_items`
+    if [ -n "$items" ]; then
+        print_green -n 'Items: '; print_cyan $items
+        if [ -n "$default_items" ]; then
+            print
+            print_green -n 'DEFAULT items: '; print_cyan $default_items
+        fi
+    else
+        print 'No items are configured.'
+    fi
+}
+
 do_command_conf() {
     print DSync configuration
     print
@@ -1358,15 +1408,9 @@ do_command_conf() {
     local default_items
     default_items=`get_default_items`
     if [ -n "$default_items" ]; then
-        print_green -n "Default items: "
-        local first=1
-        for item in $default_items; do
-            [ -n "$first" ] || print -n ", " && first=
-            print_cyan -n $item
-        done
-        print
+        print_green -n "DEFAULT items: "; print_cyan $default_items
     else
-        print_green "No items will be synchronized by default."
+        print_green "No DEFAULT items."
     fi
     print
 
@@ -1399,6 +1443,8 @@ do_command_conf() {
         print "No items are configured."
         return 0
     fi
+
+    print_green Configured items:
 
     newline_ifs
     for item in `list_items`; do
@@ -1514,18 +1560,20 @@ usage() {
     print "      (and override anything set in config) for that run."
     print
     print_cyan -n "log   "
-    print "[all] [match REGEXP] [clear] [remote [[USER@]HOST]]"
+    print "[all] [match REGEXP] [clear] [lastop] [remote [[USER@]HOST]]"
     print "      Shows  entries from the local (or remote) DSync log file."
     print "      By default, only entries for the last three days are shown. You can optionally specify"
     print "      'all', which will show all entries, or 'match REGEXP', which will show all entries"
     print "      matching a given regular expression (matching is case-insensitive)."
     print "      If 'clear' is specified, then the DSync log file is cleared of all entries."
+    print "      If 'lastop' is specified, then the last logged operation for each configured item is shown."
     print "      If a remote host is specified, then the DSync log on that host is operated upon."
     print
-    print_cyan -n "conf  "; print "[example]"
+    print_cyan -n "conf  "; print "[example] [items]"
     print "      Parses and lists current configuration."
     print "      If 'example' is specified, then a DSync example configuration file"
-    print "      is printed to standard out."
+    print "      is printed to standard out. If 'items' is specified, then only"
+    print "      item names are listed."
     print
     print_cyan "bashcomp"
     print "      This special command emits BASH script code for supporting DSync"
@@ -1594,6 +1642,7 @@ LOG_CLEAR=
 LOG_REMOTE=
 LOG_REGEXP=
 LOG_ALL=
+LOG_LASTOP=
 
 # Set basedir to HOME
 cd "$HOME"
@@ -1700,13 +1749,7 @@ case "$COMMAND" in
 
         print "Remote host: $HOST"
         print
-        print -n "Selected items: ";
-        first=1
-        for item in $items; do
-            [ -n "$first" ] || print -n ", "; first=
-            print_cyan -n "$item"
-        done
-        print
+        print -n "Selected items: "; print_cyan $items
         OP=$COMMAND
 
         do_command_sync $items
@@ -1716,6 +1759,13 @@ case "$COMMAND" in
         if [ -n "$1" ]; then
             if [ "$1" = example ]; then
                 do_command_conf_example
+            elif [ "$1" = items ]; then
+                parse_configuration "$HOME/$DSYNC_CONFIG_FILE"
+                if [ $? -ne 0 ]; then
+                    print_err "Failed to parse configuration."
+                    exit 255
+                fi
+                do_command_conf_items
             else
                 print_err "Unknown argument to 'conf' command: $1"
                 usage
@@ -1740,6 +1790,7 @@ case "$COMMAND" in
             case "$1" in
                 all) LOG_ALL=1 ;;
                 clear) LOG_CLEAR=1 ;;
+                lastop) LOG_LASTOP=1 ;;
                 match)
                     if [ -z "$2" ]; then
                         print_err "Missing regular expression after 'match'"
