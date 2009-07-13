@@ -181,7 +181,7 @@ $1"
     done
 
     local errors= retcode
-    # FIXME: --protect-args is only compatible with recent rsync versions, work-around by escaping instead :(
+    # FIXME: --protect-args is only compatible with recent rsync versions, stay compatible and work-around by escaping instead :(
     case $OP in
         push)
             if [ -n "$relative_paths" ]; then
@@ -488,7 +488,7 @@ log_hook() {
             echo "`date +'%Y-%m-%d %H:%M'` -->     PUSH item $CURRENT_ITEM to host $HOST$message" >> "$HOME/$DSYNC_LOG_FILE"
 
             # Update remote dsync log file
-            echo "`date +'%Y-%m-%d %H:%M'`     <-- REMOTE_PUSH from host `hostname`, item $CURRENT_ITEM$message" |\
+            echo "`date +'%Y-%m-%d %H:%M'`     <-- REMOTE_PUSH item $CURRENT_ITEM from host `hostname`$message" |\
                  ssh $HOST "cat - >> $DSYNC_LOG_FILE"
             if [ $? -ne 0 ]; then
                 print_warn "Failed to update remote dsync log file"
@@ -499,7 +499,7 @@ log_hook() {
             echo "`date +'%Y-%m-%d %H:%M'`     <-- FETCH item $CURRENT_ITEM from host $HOST$message" >> "$HOME/$DSYNC_LOG_FILE"
 
             # Update remote dsync log file
-            echo "`date +'%Y-%m-%d %H:%M'` -->     REMOTE_FETCH from host `hostname`, item $CURRENT_ITEM$message" |\
+            echo "`date +'%Y-%m-%d %H:%M'` -->     REMOTE_FETCH item $CURRENT_ITEM from host `hostname`$message" |\
                  ssh $HOST "cat - >> $DSYNC_LOG_FILE"
             if [ $? -ne 0 ]; then
                 print_warn "Failed to update remote dsync log file"
@@ -515,14 +515,10 @@ do_command_log() {
     fi
 
     if [ -n "$LOG_LASTOP" ]; then
-        local items item
-        for item in `list_items`; do items="$items $item"; done
         if [ -n "$HOST" ]; then
             print "Last operation per item in DSync log on remote host: $HOST"
             print
-            ssh $HOST "/bin/sh -c 'for item in $items; do grep -F \$item $DSYNC_LOG_FILE|tail -n1; done'" | \
-                sed 's/\(, item [a-zA-Z0-9_]*\),.*$/\1/' | \
-                sort -k4
+            ssh $HOST "/bin/sh -c 'for item in \`sort -u -k6,6 $DSYNC_LOG_FILE|awk \"{print $6}\"\`; do grep -F \"item \$item\" $DSYNC_LOG_FILE|tail -n1; done'" 
             case $? in # FIXME: duplicated error handling code (look further down).
                 0|1)
                 # OK
@@ -542,10 +538,11 @@ do_command_log() {
                     ;;
             esac
         else
-            local item
-            (for item in $items; do
-                grep -F " item $item " "$HOME/$DSYNC_LOG_FILE"|tail -n1
-                done) | sed 's/,.*$//' |sort -k4
+            print "Last operation per item in local DSync log"
+            print
+            for item in $(sort -u -k6,6 "$HOME/$DSYNC_LOG_FILE"|awk '{print $6}'); do
+                grep -F "item $item" "$HOME/$DSYNC_LOG_FILE"|tail -n1
+            done
         fi
 
         return 0
@@ -1137,7 +1134,7 @@ EOF
 }
 
 do_command_bashcomp() {
-    print '# Context-sensitive DSync command line auto-completion BASH code'
+    print '# Cursor context sensitive DSync command line auto-completion (Bash)'
     print '__DSYNC_COMP_ITEMS='
     print '__DSYNC_COMP_DEFAULT_ITEMS='
     print '__DSYNC_CONFIG_TIMESTAMP=0'
@@ -1155,6 +1152,7 @@ EOF
     print "            $(basename $0) conf items 1>/dev/null 2>&1 || return # some error in config, cannot complete"
     print "            __DSYNC_COMP_ITEMS=\$($(basename $0) conf items|grep '^Items:'|cut -d' ' -f2-)"
     print "            __DSYNC_COMP_DEFAULT_ITEMS=\$($(basename $0) conf items|grep '^DEFAULT items:'|cut -d' ' -f3-)"
+# FIXME: this got slightly too complex in the end .. clean up please.
     cat <<"EOF"
             __DSYNC_CONFIG_TIMESTAMP=$mtime
         fi
@@ -1164,14 +1162,14 @@ EOF
     local OPTIONS="--interactive --yes --compression --only-update --dry --color --verbose --version"
     local state=first cursorstate= j=0 word
     for word in "${COMP_WORDS[@]}"; do
-        [ $j = $COMP_CWORD ] && cursorstate=$state # cursor-state (current word)
         case $state in
             first)
                 # move on to options_or_command state
                 state=options_or_command
                 ;;
+
             options_or_command)
-                if [ -n "$word" ] && [ "${word:0:1}" = - ]; then
+                if [ "${word:0:1}" = - ]; then
                     # option word
                     local option= o
                     for o in $OPTIONS; do
@@ -1182,7 +1180,7 @@ EOF
                     done
 
                     local provided_options
-                    if [ -n "$option" ] && [ $j -ne $COMP_CWORD ]; then
+                    if [ -n "$option" ]; then
                         provided_options="$provided_options $option"
                     fi
                 elif [ -n "$word" ]; then
@@ -1202,7 +1200,9 @@ EOF
                     fi
                 fi
                 ;;
+
             push)
+                local pushargs=1
                 if [ -n "$word" ]; then
                     if [ "$word" = to ]; then
                         [ -z "$host" ] && state=host || break
@@ -1216,13 +1216,14 @@ EOF
                         done
 
                         local provided_items
-                        if [ -n "$item" ] && [ $j -ne $COMP_CWORD ]; then
+                        if [ -n "$item" ]; then
                             provided_items="$provided_items $item"
                         fi
                     fi
                 fi
                 ;;
             fetch)
+                local fetchargs=1
                 if [ -n "$word" ]; then
                     if [ "$word" = from ]; then
                         [ -z "$host" ] && state=host || break
@@ -1236,13 +1237,14 @@ EOF
                         done
 
                         local provided_items
-                        if [ -n "$item" ] && [ $j -ne $COMP_CWORD ]; then
+                        if [ -n "$item" ]; then
                             provided_items="$provided_items $item"
                         fi
                     fi
                 fi
                 ;;
             log)
+                local logargs=1
                 if [ -n "$word" ]; then
                     local logarg_all logarg_clear logarg_lastop
                     case $word in
@@ -1259,36 +1261,49 @@ EOF
                 fi
                 ;;
             logmatch)
-                [ -z "$word" ] && break
-                local matchregexp
-                matchregexp=$word
-                state=log
+                local logmatchargs=1
+                if [ -n "$word" ]; then
+                    local matchregexp
+                    matchregexp=$word
+                    if [ $j != $COMP_CWORD ]; then state=log; fi
+                fi
                 ;;
             conf)
-                break # only zero or one argument
+                local confargs=1
+                local confarg_example confarg_items
+                case $word in
+                  example) confarg_example=1 ;;
+                  items) confarg_items=1 ;;
+                  *) break ;;
+                esac
                 ;;
             bashcomp)
+                local bashcompargs=1
                 break # command takes no arguments
                 ;;
             host)
-                local host
+                local hostargs=1 host
                 if [ -n "$word" ]; then
                     host=$word
-                    state=$command
+                    if [ $j != $COMP_CWORD ]; then state=$command; fi
                 fi
                 ;;
         esac
+        if [ $j = $COMP_CWORD ]; then cursorstate=$state; fi # save state in which cursor is currently at
         j=$((j+1))
     done
+    if [ -z "$cursorstate" ]; then cursorstate=$state; fi
 
-    # Now do completion based on cursor context and rest of state
+    # Now do completion based on cursor state and rest of context
     case $cursorstate in
         options_or_command)
             local options= o
             for o in $OPTIONS; do
                 local provided_option
                 for provided_option in $provided_options; do
-                    [ "$provided_option" = "$o" ] && continue 2
+                    if [ "$provided_option" = "$o" ] && ! [ "${COMP_WORDS[COMP_CWORD]}" = "$o" ]; then
+                        continue 2
+                    fi
                 done
                 options="$options $o"
             done
@@ -1301,10 +1316,18 @@ EOF
             ;;
 
         push|fetch)
+            if [ -z "$pushargs" ] && [ -z "$fetchargs" ]; then
+                if [ "${COMP_WORDS[COMP_CWORD]}" = fetch ]; then
+                    COMPREPLY=(fetch); return
+                elif [ "${COMP_WORDS[COMP_CWORD]}" = push ]; then
+                    COMPREPLY=(push); return
+                fi
+            fi
+
             local items= i DEFAULT_provided= provided_item
             for i in $__DSYNC_COMP_ITEMS; do
                 for provided_item in $provided_items; do
-                    [ "$provided_item" = "$i" ] && continue 2
+                    [ "$provided_item" = "$i" ] && ! [ "${COMP_WORDS[COMP_CWORD]}" = "$i" ] && continue 2
                     [ "$provided_item" = DEFAULT ] && DEFAULT_provided=1
                 done
                 items="$items $i"
@@ -1325,9 +1348,7 @@ EOF
                     items=$items_default_filtered
                 fi
             fi
-            
             if [ -z "$host" ]; then
-                local tofrom
                 [ $cursorstate = fetch ] && tofrom=from || tofrom=to
                 COMPREPLY=($(compgen -W "$items $tofrom" -- ${COMP_WORDS[COMP_CWORD]}))
             else
@@ -1336,36 +1357,76 @@ EOF
             ;;
 
         conf)
-            COMPREPLY=($(compgen -W "example items" -- ${COMP_WORDS[COMP_CWORD]}))
-            ;;
-        log)
-            local logargs=
-            [ -n "$logarg_lastop" ] && [ -n "$logarg_all$logarg_clear$matchregexp" ] && return # invalid combo
-            [ -n "$logarg_all" ] && [ -n "$logarg_clear$matchregexp$logarg_lastop" ] && return # invalid combo
-            [ -n "$logarg_clear" ] && [ -n "$matchregexp$logarg_all$logarg_lastop" ] && return # invalid combo
-            if [ -n "$logarg_clear" ] || [ -n "$logarg_all" ] || [ -n "$matchregexp" ] || [ -n "$logarg_lastop" ]; then
-                [ -z "$host" ] && logargs="remote"
+            local reply=
+            if [ "${COMP_WORDS[COMP_CWORD]}" = conf ] && [ -z "$confargs" ]; then
+                reply=conf
+            elif [ -n "$confarg_items" ]; then
+                if [ "${COMP_WORDS[COMP_CWORD]}" = items ]; then reply=items; else reply=; fi
+            elif [ -n "$confarg_example" ]; then
+                if [ "${COMP_WORDS[COMP_CWORD]}" = example ]; then reply=example; else reply=; fi
             else
-                [ -z "$host" ] && logargs="remote"
-                logargs="$logargs all clear match lastop"
+                reply="example items"
             fi
-            COMPREPLY=($(compgen -W "$logargs" -- ${COMP_WORDS[COMP_CWORD]}))
+            COMPREPLY=($(compgen -W "$reply" -- ${COMP_WORDS[COMP_CWORD]}))
             ;;
+
+        log)
+            local reply=
+            if [ "${COMP_WORDS[COMP_CWORD]}" = log ] && [ -z "$logargs" ]; then
+                reply=log
+            else
+                if [ -n "$logarg_lastop" ] && [ -n "$logarg_all$logarg_clear$matchregexp" ]; then return; fi # invalid combo
+                if [ -n "$logarg_all" ] && [ -n "$logarg_clear$matchregexp$logarg_lastop" ]; then return; fi # invalid combo
+                if [ -n "$logarg_clear" ] && [ -n "$matchregexp$logarg_all$logarg_lastop" ]; then return; fi # invalid combo
+
+                if [ -n "$logarg_clear" ] || [ -n "$logarg_all" ] || [ -n "$matchregexp" ] || [ -n "$logarg_lastop" ]; then
+                    case ${COMP_WORDS[COMP_CWORD]} in
+                        clear) reply=clear ;;
+                        all) reply=all ;;
+                        lastop) reply=lastop ;;
+                    esac
+                    [ -z "$host" ] && reply="$reply remote"
+                else
+                    [ -z "$host" ] && reply="remote"
+                    reply="$reply all clear match lastop"
+                fi
+            fi
+            COMPREPLY=($(compgen -W "$reply" -- ${COMP_WORDS[COMP_CWORD]}))
+            ;;
+
         host)
-            if [ -f ~/.ssh/config ]; then
+            local reply=
+            if [ -z "$hostargs" ]; then
+                if [ "${COMP_WORDS[COMP_CWORD]}" = to ] || [ "${COMP_WORDS[COMP_CWORD]}" = from ] || [ "${COMP_WORDS[COMP_CWORD]}" = remote ]; then
+                    reply=${COMP_WORDS[COMP_CWORD]}
+                fi
+            elif [ -f ~/.ssh/config ]; then
                 # Complete on hosts found in ~/.ssh/config
                 local hosts= host
                 for host in $(awk '/^[ 	]*host[ 	]/ {for (i=2; i<=NF; i++) { printf("%s ",$i)}}' < ~/.ssh/config); do
                     hosts="$hosts $host"
                 done
-                COMPREPLY=($(compgen -W "$hosts" -- ${COMP_WORDS[COMP_CWORD]}))
+                reply=$hosts
+            fi
+            COMPREPLY=($(compgen -W "$reply" -- ${COMP_WORDS[COMP_CWORD]}))
+            ;;
+
+        logmatch)
+            local reply
+            if [ "${COMP_WORDS[COMP_CWORD]}" = match ] && [ -z "$logmatchargs" ]; then
+                reply=match
+            else
+                reply=$__DSYNC_COMP_ITEMS
+            fi
+            # Complete on configured item names (for easy filtering of certain items from log)
+            COMPREPLY=($(compgen -W "$reply" -- ${COMP_WORDS[COMP_CWORD]}))
+            ;;
+
+        bashcomp)
+            if [ "${COMP_WORDS[COMP_CWORD]}" = bashcomp ] && [ -z "$bashcompargs" ]; then
+                COMPREPLY=(bashcomp)
             fi
             ;;
-        logmatch)
-            # Complete on configured item names (for easy filtering of certain items from log)
-            COMPREPLY=($(compgen -W "$__DSYNC_COMP_ITEMS" -- ${COMP_WORDS[COMP_CWORD]}))
-            ;;
-        bashcomp) : ;;
     esac
 }
 EOF
@@ -1568,7 +1629,7 @@ usage() {
     print "      'all', which will show all entries, or 'match REGEXP', which will show all entries"
     print "      matching a given regular expression (matching is case-insensitive)."
     print "      If 'clear' is specified, then the DSync log file is cleared of all entries."
-    print "      If 'lastop' is specified, then the last logged operation for each configured item is shown."
+    print "      If 'lastop' is specified, then the last logged operation for each item is shown."
     print "      If a remote host is specified, then the DSync log on that host is operated upon."
     print
     print_cyan -n "conf  "; print "[example] [items]"
