@@ -31,7 +31,7 @@
 # $Id$
 
 # Global constants and default values.
-readonly DSYNC_VERSION=0.60
+readonly DSYNC_VERSION=0.65
 readonly DSYNC_LOG_FILE=".dsync.log"
 readonly DSYNC_CONFIG_FILE=".dsync.conf"
 readonly DEBUG=
@@ -390,7 +390,11 @@ do_command_sync() {
         fi
 
         # Do any kills
+        unset NO_KILL_CONFIRMATION
         if item_has_kills $item; then
+            if item_has_flag $item no_ask_kill; then
+                NO_KILL_CONFIRMATION=1
+            fi
             newline_ifs
             ask_kill_local_remote `list_item_kills $item`
             reset_ifs
@@ -461,8 +465,14 @@ ask_kill_local_remote() {
         print_warn "Processes associated with item $CURRENT_ITEM found running locally:"
         ps -p "$local_pids" -o pid,cmd
         print
-        if ask_ynq "Kill them before sync ?"; then
+        if [ -n "$NO_KILL_CONFIRMATION" ]; then
+            print "Killing now"
             kill $local_pids && sleep 3 || ask_abort "Failed to kill local processes associated with item $CURRENT_ITEM"
+        else
+            if ask_ynq "Kill them before sync ?"; then
+                print "Killing now"
+                kill $local_pids && sleep 3 || ask_abort "Failed to kill local processes associated with item $CURRENT_ITEM"
+            fi
         fi
     fi
 
@@ -470,8 +480,14 @@ ask_kill_local_remote() {
         print_warn "Processes associated with item $CURRENT_ITEM found running remotely:"
         ssh $HOST "ps -p '$remote_pids' -o pid,cmd"
         print
-        if ask_ynq "Kill them before sync ?"; then
+        if [ -n "$NO_KILL_CONFIRMATION" ]; then
+            print "Killing now"
             ssh $HOST kill $remote_pids && sleep 3 || ask_abort "Failed to kill remote processes associated with item $CURRENT_ITEM"
+        else
+            if ask_ynq "Kill them before sync ?"; then
+                print "Killing now"
+                ssh $HOST kill $remote_pids && sleep 3 || ask_abort "Failed to kill remote processes associated with item $CURRENT_ITEM"
+            fi
         fi
     fi
 }
@@ -930,6 +946,14 @@ parse_configuration() {
                 add_item_kill "$CURRENT_ITEM" "$value"
                 ;;
 
+            no_ask_kill)
+                if [ -z "$CURRENT_ITEM" ]; then
+                    print_err "Config option 'no_ask_kill' can only be set for an item, not globally."
+                else
+                    set_item_flag_true "$CURRENT_ITEM" no_ask_kill
+                fi
+                ;;
+
             precondition|cond)
                 if [ -z "$CURRENT_ITEM" ]; then
                     print_err "Config: $keyword keyword with no corresponding item: $line"
@@ -942,7 +966,7 @@ parse_configuration() {
                 add_item_cond "$CURRENT_ITEM" "$value"
                 ;;
 
-            rsync_option)
+            rsync_option|rsync_opt)
                 if [ -z "$CURRENT_ITEM" ]; then
                     print_err "Config: $keyword keyword with no corresponding item: $line"
                     return 1
@@ -954,7 +978,7 @@ parse_configuration() {
                 add_item_rsync_option "$CURRENT_ITEM" "$value"
                 ;;
 
-            sync_by_default)
+            sync_by_default|default)
                 if [ -z "$CURRENT_ITEM" ]; then
                     set_global_flag_true sync_by_default
                 else
@@ -1063,11 +1087,12 @@ item Bar                                          # another item named Bar
 # Now some real applications:
 
 item Firefox
-     directory .mozilla/                          # Firefox profiles
-     kill "^(/usr/lib/firefox-3.0.4/)?firefox ?"  # Killing any running Firefox before sync is important.
+     directory .mozilla/                             # Firefox profiles
+     kill "^(/usr/lib/firefox-[0-9\.]+/)?firefox ?"  # Killing any running Firefox before sync is important.
                                                   # The kill pattern is a regular expression which should 
                                                   # match the command you want killed.
      sync_by_default                              # Want this item to be synchronized if nothing is specified on command line
+     no_ask_kill     # Don't ask if we want to kill any running, just do it.
 
 item Evolution
      directory .evolution                                 # Evolution data files
@@ -1524,7 +1549,11 @@ do_command_conf() {
 
         for kill in `list_item_kills $item`; do
             print_red -n "  Kill "
-            print "processes matching  '$kill'"
+            print -n "processes matching  '$kill'"
+            if item_has_flag $item no_ask_kill; then
+                print -n " (no confirmation)"
+            fi
+            print
         done
 
         for cond in `list_item_conds $item`; do
