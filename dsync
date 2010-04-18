@@ -1,34 +1,46 @@
 #!/bin/sh
-# License: GPL version 3
+# -*- coding: utf-8 -*-
+# DSync
+# Copyright (C) 2009 Øyvind Stegard <oyvind.stegard@ifi.uio.no>
+###############################################################################
+#                                LICENSE
+# This program is free software: you can redistribute it and/or modify it under
+# the terms of the GNU General Public License as published by the Free Software
+# Foundation, either version 3 of the License, or (at your option) any later
+# version.
 #
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
+# This program is distributed in the hope that it will be useful, but WITHOUT
+# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+# FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
 #
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
+# You should have received a copy of the GNU General Public License along with
+# this program. If not, see <http://www.gnu.org/licenses/>.
+###############################################################################
 #
-# You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+# Script for easy synchronization of items between different computers.
 #
-
-# Script for easy manual synchronization of items between
-# different computers.
 # Requirements:
-# - Bourne-compatible shell (sh). GNU bash not required.
+# - Bourne-compatible shell (sh). GNU bash not required (code should be free of
+#   "bashisms"). Tested with the dash shell.
 # - rsync for file/directory sync (tested with version 3.0.3)
 # - gconftool/gconftool-2 for sync of GConf-trees (optional dependecy).
 # - ssh, preferably set up with public key authentication for remote hosts.
 #
-# Report bugs to author:
+# Documentation: dsync -h
+#
+# Bugs can be reported to author:
 # Øyvind Stegard <oyvind.stegard@ifi.uio.no>
 #
-# TODO documentation
 # TODO clean up IFS handling.
-# $Id$
+# TODO better documentation
+# TODO improve config file parsing, allow multiple files/dirs per file/dir stanza.
+# TODO item sync status check (with some efficient heuristics for determining
+#      actual status).
+# TODO add operation to prune log of items that are no longer configured.
+#      (Makes "dsync log lastop" a bit easier to cope with.)
+# TODO Alternativlely make log lastop ignore items which are not actually configured.
+# TODO Config parsing is not particularly efficient.
+#
 
 # Global constants and default values.
 readonly DSYNC_VERSION=0.66
@@ -113,7 +125,7 @@ path_escape_compatible() {
 # Handle files and directories
 handler_file() {
     # Check that we have rsync
-    which rsync 1>/dev/null 2>&1 || {
+    type rsync 1>/dev/null 2>&1 || {
         print_err "Missing required dependency: rsync"
         print_err "It has to be available somewhere in your PATH."
         return 255
@@ -131,8 +143,10 @@ handler_file_internal() {
     local opts
     opts=$RSYNC_EXTRA_OPTS
 
-    # RSync command line opts is newline-separated. We bend over backwards to properly support file names with spaces in them, while
-    # also batching together all relative paths in a single rsync run to make things the most efficient.
+    # RSync command line opts is newline-separated. We bend over backwards to
+    # properly support file names with spaces in them, while also batching
+    # together all relative paths in a single rsync run to make things the most
+    # efficient.
 
     [ -n "$opts" ] && print "Extra rsync options: $opts"
 
@@ -181,7 +195,7 @@ $1"
     done
 
     local errors= retcode
-    # FIXME: --protect-args is only compatible with recent rsync versions, stay compatible and work-around by escaping instead :(
+    # FIXME: --protect-args is only compatible with recent rsync versions, stay compatible and work-around by escaping instead.
     case $OP in
         push)
             if [ -n "$relative_paths" ]; then
@@ -293,7 +307,7 @@ handler_gconf() {
     reset_ifs
 
     # Check that we have gconftool or gconftool locally at least.
-    which gconftool 1>/dev/null 2>&1 || {
+    type gconftool 1>/dev/null 2>&1 || {
         print_err "Missing required dependency for GConf-sync: gconftool"
         print_err "It has to be available somewhere in your PATH."
         return 255
@@ -1601,7 +1615,7 @@ do_command_conf() {
 }
 
 version() {
-    echo "DSync v$DSYNC_VERSION by Øyvind Stegard"|iconv -f utf-8
+    echo "DSync $DSYNC_VERSION"
     exit 0
 }
 
@@ -1681,7 +1695,7 @@ usage() {
     print "-n, --dry          Enable dry-run mode. Useful to see what rsync would do."
     print "-c, --color        Enable colors in terminal output."
     print "-v, --verbose      Display verbose output."
-    print "--version          Show version."
+    print "-V, --version      Show version."
     print
     print `echo 'Report bugs to Øyvind Stegard <oyvind.stegard@ifi.uio.no>.'|iconv -f utf-8`
     exit 255
@@ -1698,7 +1712,7 @@ GLOPT_DRYRUN=
 GLOPT_ONLY_UPDATE=
 while [ -n "$1" ]; do
     case $1 in
-        --version) version ;;
+        -V|--version) version ;;
         -Y|--yes) GLOPT_YES=1 ;;
         -i|--interactive) GLOPT_INT=1 ;;
         -v|--verbose) GLOPT_VERB=1 ;;
@@ -1711,6 +1725,7 @@ while [ -n "$1" ]; do
             usage ;;
         -*)
             # Handle grouped options here
+            echo $1|grep -Fq V && version
             echo $1|grep -Fq Y && GLOPT_YES=1
             echo $1|grep -Fq i && GLOPT_INT=1
             echo $1|grep -Fq v && GLOPT_VERB=1
@@ -1718,7 +1733,7 @@ while [ -n "$1" ]; do
             echo $1|grep -Fq c && GLOPT_COLORS=1
             echo $1|grep -Fq d && GLOPT_DRYRUN=1
             echo $1|grep -Fq u && GLOPT_ONLY_UPDATE=1
-            echo $1|grep -Eqv '^-([Yivzcdu]){1,7}$' && { print_err "Invalid option: '$1'"; usage; }
+            echo $1|grep -Eqv '^-([YivzcduV]){1,8}$' && { print_err "Invalid option: '$1'"; usage; }
             ;;
         *)
             # End of global options
