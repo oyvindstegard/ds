@@ -1738,16 +1738,16 @@ usage() {
     print "      source it from ~/.bashrc or equivalent."
     print
     print_green "Global options:"
-    print "-i, --interactive  Ask before syncing each item."
-    print "-Y, --yes          Automatically answer YES to all interactive questions."
-    print "-z, --compression  Use compression for data-transfers to/from remote host."
-    print "-u, --only-update  Disable options 'force_update' and 'target_deletes'"
-    print "                   for all items regardless of what is set in config."
-    print "-n, --dry          Enable dry-run mode. Useful to see what rsync would do."
-    print "-c, --color        Enable colors in terminal output."
-    print "-v, --verbose      Display verbose output."
-    print "-V, --version      Show version."
-    print "-h, --help         This help."
+    print "  -i, --interactive  Ask before syncing each item."
+    print "  -Y, --yes          Automatically answer YES to all interactive questions."
+    print "  -z, --compression  Use compression for data-transfers to/from remote host."
+    print "  -u, --only-update  Disable options 'force_update' and 'target_deletes'"
+    print "                     for all items regardless of what is set in config."
+    print "  -n, --dry          Enable dry-run mode. Useful to see what rsync would do."
+    print "  -c, --color        Enable colors in terminal output."
+    print "  -v, --verbose      Display verbose output."
+    print "  -V, --version      Show version."
+    print "  -h, --help         This help."
     exit 255
 }
 
