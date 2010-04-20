@@ -46,11 +46,11 @@ readonly DEBUG=
 tty_color() {
     if [ "$GLOPT_COLORS" ] && [ -t 1 ]; then
         case "$1" in
-            red)    /bin/echo -en '\033[0;31m' ;;
-            green)  /bin/echo -en '\033[0;32m' ;;
-            yellow) /bin/echo -en '\033[0;33m' ;;
-            cyan)   /bin/echo -en '\033[0;36m' ;;
-            reset)  /bin/echo -en '\033[0m'    ;;
+            red)    echo -n '[0;31m' ;;
+            green)  echo -n '[0;32m' ;;
+            yellow) echo -n '[0;33m' ;;
+            cyan)   echo -n '[0;36m' ;;
+            reset)  echo -n '[0m'    ;;
             *) : ;;
         esac
     else
@@ -924,8 +924,7 @@ parse_configuration() {
             if [ "$keyword" ]; then
                 list_append values "$token"
             else
-                # Have no keyword yet
-                keyword="$token"
+                keyword="$token"  
             fi
             continue
         fi
