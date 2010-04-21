@@ -453,7 +453,6 @@ ask_kill_local_remote() {
     local remote_pids=
     local username=$USER
     if [ "${HOST#*@*}" != "$HOST" ]; then
-        #if echo $HOST|grep -q '@'; then
         username="`echo $HOST|cut -d@ -f1`"
     fi
 
