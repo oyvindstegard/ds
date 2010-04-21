@@ -125,8 +125,8 @@ handler_file() {
         return 255
     }
     reset_ifs
-    local retval
-    local oldpwd=`pwd`
+    local retval oldpwd
+    oldpwd=`pwd`
     cd "$HOME"                # Jump to home-directory as default base-path
     handler_file_internal "$@"
     retval=$?
