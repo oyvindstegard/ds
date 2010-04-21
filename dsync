@@ -702,7 +702,7 @@ list_size() {
 add_item() {
     eval "[ \"\$CONF_ITEM_$1\" ]" && return 1 # item already registered ..
     eval "CONF_ITEM_$1=1" # register
-    list_append CONF_ITEM_LIST "$name"
+    list_append CONF_ITEM_LIST "$1"
 }
 list_items() {
     list_elements CONF_ITEM_LIST
