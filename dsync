@@ -27,10 +27,10 @@
 # - ssh, preferably set up with public key authentication for remote hosts.
 #
 # Documentation: dsync -h
+#                dsync conf example
 #
 # Bugs can be reported to author: Øyvind Stegard <oyvind.stegard@ifi.uio.no>
 #
-# TODO clean up IFS handling.
 # TODO better documentation
 # TODO item sync status check
 #      (with some efficient heuristics for determining  actual status).
@@ -134,7 +134,7 @@ handler_file() {
     return $retval
 }
 handler_file_internal() {
-    local opts
+    local opts relative_paths= absolute_paths= relative_paths_display=
     opts=$RSYNC_EXTRA_OPTS
 
     # RSync command line opts is newline-separated. We bend over backwards to
@@ -155,13 +155,10 @@ handler_file_internal() {
     [ "$FORCE_UPDATE" ] || opts="$opts
 --update"
 
-    local relative_paths=
-    local absolute_paths=
-    local relative_paths_display=
     while [ "$1" ]; do
         case $OP in
             push)
-                if echo $1|grep -qv ^/; then
+                if [ "${1#/}" = "$1" ]; then
                     relative_paths="$relative_paths
 $1"
                     [ -z "$relative_paths_display" ] && relative_paths_display=$1 || relative_paths_display="$relative_paths_display, $1"
@@ -174,7 +171,7 @@ $1"
 
             fetch)
                 local escaped_path
-                if echo $1|grep -qv ^/; then
+                if [ "${1#/}" = "$1" ]; then
                     escaped_path=`path_escape_compatible "$1"`
                     relative_paths="$relative_paths
 $HOST:$escaped_path"
@@ -455,7 +452,8 @@ ask_kill_local_remote() {
     local local_pids=
     local remote_pids=
     local username=$USER
-    if echo $HOST|grep -q '@'; then
+    if [ "${HOST#*@*}" != "$HOST" ]; then
+        #if echo $HOST|grep -q '@'; then
         username="`echo $HOST|cut -d@ -f1`"
     fi
 
@@ -702,12 +700,9 @@ list_size() {
 # End of internal list utility functions
 
 # Functions for storing parsed configuration values:
-
 add_item() {
-    local name
-    name="$1"
-    eval "[ \"\$CONF_ITEM_$name\" ]" && return 1 # item already registered ..
-    eval "CONF_ITEM_$name=1" # register
+    eval "[ \"\$CONF_ITEM_$1\" ]" && return 1 # item already registered ..
+    eval "CONF_ITEM_$1=1" # register
     list_append CONF_ITEM_LIST "$name"
 }
 list_items() {
@@ -715,9 +710,7 @@ list_items() {
     echo "$LIST_RETVAL"
 }
 have_item() {
-    local name
-    name="$1"
-    eval "[ \"\$CONF_ITEM_$name\" ]"
+    eval "[ \"\$CONF_ITEM_$1\" ]"
 }
 have_items() {
     [ "$CONF_ITEM_LIST" ]
@@ -855,9 +848,6 @@ item_flag_effective_value() {
     fi
 }
 
-# Nice and simple, but lenient config parser which does all the things a user expects.
-# Allows comments (also inline), good white-space handling, quote handling
-# and checks syntax and validity.
 unset CURRENT_ITEM
 unset CONF_GLOBAL_DEFAULT_HOST
 set_global_flag_true  target_deletes
@@ -875,7 +865,7 @@ token_stream() {
       /^[ 	]*[^ 	]/ {
           for (i=1; i<=NF; i++) {
               if ($i == "#") { print "'"$EOS"'"; next; }
-              if (esc) { word = word $i; esc = 0; continue; }
+              if (esc) { word = word $i; esc=0; continue; }
               if ($i == "\\") {
                   esc=1;
               } else if ($i == "\"" || $i == "'\''") {
@@ -907,6 +897,9 @@ token_stream() {
       }' "$1"
 }
 
+# Nice and simple, but lenient config parser which does all the things a user expects.
+# Allows comments (also inline), good white-space handling, quote handling
+# and checks syntax and validity.
 parse_configuration() {
     local config_file
     config_file="$1"
@@ -1149,11 +1142,11 @@ item Foo                                          # an item named Foo
     dir foodir2                                   # add another directory 'foodir2'
 
 item Bar                                          # another item named Bar
-    file "a file with spaces.txt"                # file names with spaces must be quoted
-    dir /site/bar/                                # absolute path to a directory
+    file "a file with spaces.txt"                 # file names with spaces must be quoted
+    dir /site/bar/                                # absolute path to a directory is allowed
 
 
-# Now some real applications:
+# Now some real apps and data:
 
 item Firefox
      directory .mozilla/                             # Firefox profiles
@@ -1161,7 +1154,7 @@ item Firefox
                                                   # The kill pattern is a regular expression which should 
                                                   # match the command you want killed.
      sync_by_default                              # Want this item to be synchronized if nothing is specified on command line
-     no_ask_kill     # Don't ask if we want to kill any running, just do it.
+     no_ask_kill                                  # Don't ask if we want to kill any running, just do it.
 
 item Evolution
      directory .evolution                                 # Evolution data files
@@ -1196,7 +1189,7 @@ item Emacs
 
 # Miscellaneous desktop stuff
 item MiscDesktop              
-    dirs  .icons/  .sounds/ .avatars/            # dirs
+    dirs  .icons/  .sounds/ .avatars/
 
     # Makes a two-way sync possible (push, then fetch or vice-versa):
     no_target_deletes              # Override/disable global option 'target_deletes' only for this item.
@@ -1554,7 +1547,7 @@ do_command_conf() {
     print
 
     if [ "$CONF_GLOBAL_DEFAULT_HOST" ]; then
-        print_green -n "Default sync partner host: "; print "$CONF_GLOBAL_DEFAULT_HOST"
+        print_green -n "Default sync partner: "; print "$CONF_GLOBAL_DEFAULT_HOST"
         print
     fi
 
@@ -1597,7 +1590,7 @@ do_command_conf() {
         return 0
     fi
 
-    print_green Configured items:
+    print_green 'Configured items:'
     
     newline_ifs
     for item in `list_items`; do
