@@ -36,9 +36,9 @@
 #      (with some efficient heuristics for determining  actual status).
 
 # Global constants and default values.
-readonly DSYNC_VERSION=0.70
-readonly DSYNC_LOG_FILE=".dsync.log"
-readonly DSYNC_CONFIG_FILE=".dsync.conf"
+readonly VERSION=0.70
+readonly LOG_FILE=".dsync.log"
+readonly CONFIG_FILE=".dsync.conf"
 readonly DEBUG=
 
 # Console output functions:
@@ -103,13 +103,13 @@ ask_ynq() {
     read -p "$* [Y/n/q] " answer
     case $answer in
         y*|Y*|"")    return 0 ;;
-        q*|Q*)       print "DSync quit."; exit 2 ;;
+        q*|Q*)       print "Quit."; exit 2 ;;
         *)           return 1 ;;
     esac
 }
 
 ask_abort() {
-    ask_ynq "$*, abort ?" && print_red "DSync aborted." && exit 255
+    ask_ynq "$*, abort ?" && print_red "Aborted." && exit 255
 }
 
 path_escape_compatible() {
@@ -506,49 +506,49 @@ log_hook() {
     [ "$message" ] && message=", $message"
     case $OP in
         push)
-            echo "`date +'%Y-%m-%d %H:%M'` -->     PUSH item $CURRENT_ITEM to host $HOST$message" >> "$HOME/$DSYNC_LOG_FILE"
+            echo "`date +'%Y-%m-%d %H:%M'` -->     PUSH item $CURRENT_ITEM to host $HOST$message" >> "$HOME/$LOG_FILE"
 
-            # Update remote dsync log file
+            # Update remote log file
             echo "`date +'%Y-%m-%d %H:%M'`     <-- REMOTE_PUSH item $CURRENT_ITEM from host `hostname`$message" |\
-                 ssh $HOST "cat - >> $DSYNC_LOG_FILE"
+                 ssh $HOST "cat - >> $LOG_FILE"
             if [ $? -ne 0 ]; then
-                print_warn "Failed to update remote dsync log file"
+                print_warn "Failed to update remote log file"
             fi
             ;;
 
         fetch)
-            echo "`date +'%Y-%m-%d %H:%M'`     <-- FETCH item $CURRENT_ITEM from host $HOST$message" >> "$HOME/$DSYNC_LOG_FILE"
+            echo "`date +'%Y-%m-%d %H:%M'`     <-- FETCH item $CURRENT_ITEM from host $HOST$message" >> "$HOME/$LOG_FILE"
 
-            # Update remote dsync log file
+            # Update remote log file
             echo "`date +'%Y-%m-%d %H:%M'` -->     REMOTE_FETCH item $CURRENT_ITEM from host `hostname`$message" |\
-                 ssh $HOST "cat - >> $DSYNC_LOG_FILE"
+                 ssh $HOST "cat - >> $LOG_FILE"
             if [ $? -ne 0 ]; then
-                print_warn "Failed to update remote dsync log file"
+                print_warn "Failed to update remote log file"
             fi
             ;;
     esac
 }
 
 do_command_log() {
-    if [ -z "$HOST" ] && [ ! -f "$HOME/$DSYNC_LOG_FILE" ]; then
-        print_warn "DSync log file ~/$DSYNC_LOG_FILE not found."
+    if [ -z "$HOST" ] && [ ! -f "$HOME/$LOG_FILE" ]; then
+        print_warn "Log file ~/$LOG_FILE not found."
         return 1
     fi
 
     if [ "$LOG_LASTOP" ]; then
         if [ "$HOST" ]; then
-            print "Last operation per configured item in DSync log on remote host: $HOST"
+            print "Last operation per configured item in log on remote host: $HOST"
             print
             local tmpfile
             tmpfile=`mktemp -t`
-            ssh $HOST "cat $DSYNC_LOG_FILE" > $tmpfile
+            ssh $HOST "cat $LOG_FILE" > $tmpfile
             case $? in # FIXME: duplicated error handling code (look further down).
                 0|1)
                 # OK
                     return 0
                     ;;
                 2)
-                    print_warn "DSync log file ~/$DSYNC_LOG_FILE not found on remote host $HOST."
+                    print_warn "Log file ~/$LOG_FILE not found on remote host $HOST."
                     return 1
                     ;;
                 255)
@@ -556,7 +556,7 @@ do_command_log() {
                     return 1
                     ;;
                 *)
-                    print_err "Unknown error while getting DSync log file on remote host $HOST"
+                    print_err "Unknown error while getting log file on remote host $HOST"
                     return 1
                     ;;
             esac
@@ -567,11 +567,11 @@ do_command_log() {
             done
             rm -f $tmpfile
         else
-            print "Last operation per configured item in local DSync log"
+            print "Last operation per configured item in local log"
             print
-            for item in `sort -u -k6,6 "$HOME/$DSYNC_LOG_FILE"|awk '{print $6}'`; do
+            for item in `sort -u -k6,6 "$HOME/$LOG_FILE"|awk '{print $6}'`; do
                 if have_item "$item"; then
-                    grep -F "item $item " "$HOME/$DSYNC_LOG_FILE"|tail -n1
+                    grep -F "item $item " "$HOME/$LOG_FILE"|tail -n1
                 fi
             done
         fi
@@ -582,20 +582,20 @@ do_command_log() {
     if [ "$LOG_CLEAR" ]; then
         # Clear logfile requested
         if [ "$HOST" ]; then
-            print "Clearing DSync log file ~/$DSYNC_LOG_FILE on remote host $HOST .."
-            ssh $HOST 'test -f $DSYNC_LOG_FILE'
+            print "Clearing log file ~/$LOG_FILE on remote host $HOST .."
+            ssh $HOST 'test -f $LOG_FILE'
             if [ $? -ne 0 ]; then
-                print_err "DSync log file not found on remote host $HOST."
+                print_err "Log file not found on remote host $HOST."
                 return 1
             else
-                ssh $HOST "echo -n > $DSYNC_LOG_FILE"
-                [ $? -ne 0 ] && print_err "Failed to clear DSync log file on remote host $HOST" && return 1
+                ssh $HOST "echo -n > $LOG_FILE"
+                [ $? -ne 0 ] && print_err "Failed to clear log file on remote host $HOST" && return 1
                 return 0
             fi
         else
-            print "Clearing DSync log file ~/$DSYNC_LOG_FILE .."
-            echo -n > "$HOME/$DSYNC_LOG_FILE"
-            [ $? -ne 0 ] && print_err "Failed to clearn DSync log file." && return 1
+            print "Clearing log file ~/$LOG_FILE .."
+            echo -n > "$HOME/$LOG_FILE"
+            [ $? -ne 0 ] && print_err "Failed to clearn log file." && return 1
             return 0
         fi
     fi
@@ -606,16 +606,16 @@ do_command_log() {
     [ "$LOG_ALL" ] && regexp=
 
     if [ "$HOST" ]; then
-        print "DSync log on remote host: $HOST"
+        print "Log on remote host: $HOST"
         print
-        ssh $HOST grep -iE \'$regexp\' $DSYNC_LOG_FILE || echo No log entries on host $HOST matched \'$regexp\'
+        ssh $HOST grep -iE \'$regexp\' $LOG_FILE || echo No log entries on host $HOST matched \'$regexp\'
         case $? in
             0|1)
                 # OK
                 return 0
                 ;;
             2)
-                print_warn "DSync log file ~/$DSYNC_LOG_FILE not found on remote host $HOST."
+                print_warn "Log file ~/$LOG_FILE not found on remote host $HOST."
                 return 1
                 ;;
             255)
@@ -623,12 +623,12 @@ do_command_log() {
                 return 1
                 ;;
             *)
-                print_err "Unknown error while getting DSync log file on remote host $HOST"
+                print_err "Unknown error while getting log file on remote host $HOST"
                 return 1
                 ;;
         esac
     else
-        grep -iE "$regexp" "$HOME/$DSYNC_LOG_FILE" || print "No log entries matched '$regexp'"
+        grep -iE "$regexp" "$HOME/$LOG_FILE" || print "No log entries matched '$regexp'"
     fi
 
     return 0
@@ -1110,7 +1110,7 @@ parse_configuration() {
 
 do_command_conf_example() {
     cat <<EOF
-# Example ~/$DSYNC_CONFIG_FILE
+# Example ~/$CONFIG_FILE
 # VERSION=3
 #
 
@@ -1221,7 +1221,7 @@ do_command_bashcomp() {
     print '__DSYNC_COMP_DEFAULT_ITEMS='
     print '__DSYNC_CONFIG_TIMESTAMP=0'
     print '_dsync_completion() {'
-    print "    local dsync_config_file=\"\$HOME/$DSYNC_CONFIG_FILE\""
+    print "    local dsync_config_file=\"\$HOME/$CONFIG_FILE\""
     cat <<"EOF"
 
     COMPREPLY=()
@@ -1542,7 +1542,7 @@ do_command_conf_items() {
 }
 
 do_command_conf() {
-    print DSync configuration
+    print Configuration
     print
 
     if [ "$CONF_GLOBAL_DEFAULT_HOST" ]; then
@@ -1658,12 +1658,12 @@ do_command_conf() {
 }
 
 version() {
-    echo "DSync $DSYNC_VERSION"
+    echo "DSync $VERSION"
     exit 0
 }
 
 usage() {
-    print "DSync v$DSYNC_VERSION"
+    print "DSync v$VERSION"
     print
     print "DSync is a command line tool for manual, but quick and easy one-way syncing/mirroring"
     print "of data to/from remote hosts. It uses rsync(1), ssh(1) and gconftool(1) to accomplish"
@@ -1743,7 +1743,7 @@ usage() {
     exit 255
 }
 
-trap 'echo && echo DSync interrupted, quitting. && exit 255' INT
+trap 'echo && echo Interrupted, quitting. && exit 255' INT
 
 GLOPT_YES=
 GLOPT_INT=
@@ -1804,7 +1804,7 @@ COMMAND=$1
 shift
 case "$COMMAND" in
     push|fetch)
-        parse_configuration "$HOME/$DSYNC_CONFIG_FILE"
+        parse_configuration "$HOME/$CONFIG_FILE"
         if [ $? -ne 0 ]; then
             print_err "Failed to parse configuration."
             exit 255
@@ -1911,7 +1911,7 @@ case "$COMMAND" in
             if [ "$1" = example ]; then
                 do_command_conf_example
             elif [ "$1" = items ]; then
-                parse_configuration "$HOME/$DSYNC_CONFIG_FILE"
+                parse_configuration "$HOME/$CONFIG_FILE"
                 if [ $? -ne 0 ]; then
                     print_err "Failed to parse configuration."
                     exit 255
@@ -1922,7 +1922,7 @@ case "$COMMAND" in
                 usage
             fi
         else
-            parse_configuration "$HOME/$DSYNC_CONFIG_FILE"
+            parse_configuration "$HOME/$CONFIG_FILE"
             if [ $? -ne 0 ]; then
                 print_err "Failed to parse configuration."
                 exit 255
@@ -1932,7 +1932,7 @@ case "$COMMAND" in
         ;;
 
     log)
-        parse_configuration "$HOME/$DSYNC_CONFIG_FILE"
+        parse_configuration "$HOME/$CONFIG_FILE"
         if [ $? -ne 0 ]; then
             print_err "Failed to parse configuration."
             exit 255
