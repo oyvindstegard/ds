@@ -36,7 +36,7 @@
 #      (with some efficient heuristics for determining  actual status).
 
 # Global constants and default values.
-readonly VERSION=0.70
+readonly VERSION=0.75
 readonly LOG_FILE=".dsync.log"
 readonly CONFIG_FILE=".dsync.conf"
 readonly DEBUG=
@@ -49,7 +49,7 @@ tty_color() {
             red)    echo -n '[0;31m' ;;
             green)  echo -n '[0;32m' ;;
             yellow) echo -n '[0;33m' ;;
-            cyan)   echo -n '[0;36m' ;;
+            cyan)   echo -n '[01;36m' ;;
             reset)  echo -n '[0m'    ;;
             *) : ;;
         esac
@@ -499,17 +499,17 @@ ask_kill_local_remote() {
 
 
 log_hook() {
-    [ "$GLOPT_DRYRUN" ] && return 0 # Log nothing for dry-runs
+    { [ "$GLOPT_DRYRUN" ] || [ "$GLOPT_NOLOG" ]; } && return 0 # Log nothing if dry run or --nolog option.
     local message
     message=$1
 
     [ "$message" ] && message=", $message"
     case $OP in
         push)
-            echo "`date +'%Y-%m-%d %H:%M'` -->     PUSH item $CURRENT_ITEM to host $HOST$message" >> "$HOME/$LOG_FILE"
+            echo "`date +'%Y-%m-%d %H:%M'` --> PUSH item $CURRENT_ITEM to host $HOST$message" >> "$HOME/$LOG_FILE"
 
             # Update remote log file
-            echo "`date +'%Y-%m-%d %H:%M'`     <-- REMOTE_PUSH item $CURRENT_ITEM from host `hostname`$message" |\
+            echo "`date +'%Y-%m-%d %H:%M'` <-- REMOTE_PUSH item $CURRENT_ITEM from host `hostname`$message" |\
                  ssh $HOST "cat - >> $LOG_FILE"
             if [ $? -ne 0 ]; then
                 print_warn "Failed to update remote log file"
@@ -517,16 +517,40 @@ log_hook() {
             ;;
 
         fetch)
-            echo "`date +'%Y-%m-%d %H:%M'`     <-- FETCH item $CURRENT_ITEM from host $HOST$message" >> "$HOME/$LOG_FILE"
+            echo "`date +'%Y-%m-%d %H:%M'` <-- FETCH item $CURRENT_ITEM from host $HOST$message" >> "$HOME/$LOG_FILE"
 
             # Update remote log file
-            echo "`date +'%Y-%m-%d %H:%M'` -->     REMOTE_FETCH item $CURRENT_ITEM from host `hostname`$message" |\
+            echo "`date +'%Y-%m-%d %H:%M'` --> REMOTE_FETCH item $CURRENT_ITEM from host `hostname`$message" |\
                  ssh $HOST "cat - >> $LOG_FILE"
             if [ $? -ne 0 ]; then
                 print_warn "Failed to update remote log file"
             fi
             ;;
     esac
+}
+
+log_color_filter() {
+    if [ -z "$GLOPT_COLORS" ] || ! [ -t 1 ]; then
+        while read line; do echo "$line"; done
+    else
+        while read date time direction op itemkw item tofromkw hostkw host rest; do
+            echo -n "$date $time $direction $op $itemkw "
+            tty_color cyan
+            echo -n "$item "
+            tty_color reset
+            if [ "${rest%OK}" != "$rest" ]; then
+                echo -n "$tofromkw $hostkw $host ${rest%OK}"
+                tty_color green
+                echo OK
+                tty_color reset
+            else
+                echo -n "$tofromkw $hostkw $host "
+                tty_color red
+                echo "$rest"
+                tty_color reset
+            fi
+        done
+    fi
 }
 
 do_command_log() {
@@ -543,26 +567,26 @@ do_command_log() {
             tmpfile=`mktemp -t`
             ssh $HOST "cat $LOG_FILE" > $tmpfile
             case $? in # FIXME: duplicated error handling code (look further down).
-                0|1)
-                # OK
-                    return 0
-                    ;;
+                0|1) : ;; # OK
                 2)
                     print_warn "Log file ~/$LOG_FILE not found on remote host $HOST."
+                    rm -f $tmpfile
                     return 1
                     ;;
                 255)
                     print_err "Could not connect to host $HOST"
+                    rm -f $tmpfile
                     return 1
                     ;;
                 *)
                     print_err "Unknown error while getting log file on remote host $HOST"
+                    rm -f $tmpfile
                     return 1
                     ;;
             esac
             for item in `sort -u -k6,6 "$tmpfile"|awk '{print $6}'`; do
                 if have_item "$item"; then
-                    grep -F "item $item " "$tmpfile"|tail -n1
+                    grep -F "item $item " "$tmpfile" | tail -n1 | log_color_filter
                 fi
             done
             rm -f $tmpfile
@@ -571,7 +595,7 @@ do_command_log() {
             print
             for item in `sort -u -k6,6 "$HOME/$LOG_FILE"|awk '{print $6}'`; do
                 if have_item "$item"; then
-                    grep -F "item $item " "$HOME/$LOG_FILE"|tail -n1
+                    grep -F "item $item " "$HOME/$LOG_FILE"| tail -n1 | log_color_filter
                 fi
             done
         fi
@@ -606,29 +630,42 @@ do_command_log() {
     [ "$LOG_ALL" ] && regexp=
 
     if [ "$HOST" ]; then
+        tmpfile=`mktemp -t`
         print "Log on remote host: $HOST"
         print
-        ssh $HOST grep -iE \'$regexp\' $LOG_FILE || echo No log entries on host $HOST matched \'$regexp\'
+        ssh $HOST cat $LOG_FILE > $tmpfile
         case $? in
-            0|1)
-                # OK
-                return 0
-                ;;
+            0|1) : ;; # OK
             2)
                 print_warn "Log file ~/$LOG_FILE not found on remote host $HOST."
+                rm -f $tmpfile
                 return 1
                 ;;
             255)
                 print_err "Could not connect to host $HOST"
+                rm -f $tmpfile
                 return 1
                 ;;
             *)
                 print_err "Unknown error while getting log file on remote host $HOST"
+                rm -f $tmpfile
                 return 1
                 ;;
         esac
+
+        if grep -qiE "$regexp" $tmpfile; then
+            grep -iE "$regexp" $tmpfile | log_color_filter
+        else
+            echo No log entries on host $HOST matched \'$regexp\'.
+        fi
+
+        rm -f $tmpfile
     else
-        grep -iE "$regexp" "$HOME/$LOG_FILE" || print "No log entries matched '$regexp'"
+        if grep -qiE "$regexp" "$HOME/$LOG_FILE"; then
+            grep -iE "$regexp" "$HOME/$LOG_FILE" | log_color_filter
+        else
+            echo No log entries matched \'$regexp\'.
+        fi
     fi
 
     return 0
@@ -1241,7 +1278,7 @@ EOF
     fi
 
     local COMMANDS="push fetch conf log bashcomp"
-    local OPTIONS="--interactive --yes --compression --only-update --dry --color --verbose --version --help"
+    local OPTIONS="--interactive --yes --compression --only-update --dry --nolog --color --verbose --version --help"
     local state=first cursorstate= j=0 word
     for word in "${COMP_WORDS[@]}"; do
         case $state in
@@ -1736,6 +1773,7 @@ usage() {
     print "  -u, --only-update  Disable options 'force_update' and 'target_deletes'"
     print "                     for all items regardless of what is set in config."
     print "  -n, --dry          Enable dry-run mode. Useful to see what rsync would do."
+    print "  -l, --nolog        Do not update any log files."
     print "  -c, --color        Enable colors in terminal output."
     print "  -v, --verbose      Display verbose output."
     print "  -V, --version      Show version."
@@ -1751,6 +1789,7 @@ GLOPT_VERB=
 GLOPT_COMP=
 GLOPT_COLORS=
 GLOPT_DRYRUN=
+GLOPT_NOLOG=
 GLOPT_ONLY_UPDATE=
 while [ "$1" ]; do
     case $1 in
@@ -1760,6 +1799,7 @@ while [ "$1" ]; do
         -v|--verbose) GLOPT_VERB=1 ;;
         -z|--compression) GLOPT_COMP=1 ;;
         -d|--dry) GLOPT_DRYRUN=1 ;;
+        -l|--nolog) GLOPT_NOLOG=1 ;;
         -u|--only-update) GLOPT_ONLY_UPDATE=1 ;;
         -V|--version) version ;;
         -h|--help) usage ;;
@@ -1776,8 +1816,9 @@ while [ "$1" ]; do
             [ "${1#*z*}" != "$1" ] && GLOPT_COMP=1
             [ "${1#*c*}" != "$1" ] && GLOPT_COLORS=1
             [ "${1#*d*}" != "$1" ] && GLOPT_DRYRUN=1
+            [ "${1#*l*}" != "$1" ] && GLOPT_NOLOG=1
             [ "${1#*u*}" != "$1" ] && GLOPT_ONLY_UPDATE=1
-            echo $1|grep -Eqv '^-([YivzcduVh]){1,9}$' && { print_err "Invalid option(s): '$1'"; usage; }
+            echo $1|grep -Eqv '^-([YivzcdluVh]){1,10}$' && { print_err "Invalid option(s): '$1'"; usage; }
             ;;
         *)
             # End of global options
