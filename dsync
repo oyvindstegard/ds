@@ -516,7 +516,7 @@ log_hook() {
             echo "`date +'%Y-%m-%d %H:%M'` <-- FETCH item $CURRENT_ITEM from host $HOST$message" >> "$HOME/$LOG_FILE"
 
             # Update remote log file
-            echo "`date +'%Y-%m-%d %H:%M'` --> REMOTE_FETCH item from host `hostname`$message" |\
+            echo "`date +'%Y-%m-%d %H:%M'` --> REMOTE_FETCH item $CURRENT_ITEM from host `hostname`$message" |\
                  ssh $HOST "cat - >> $LOG_FILE"
             if [ $? -ne 0 ]; then
                 print_warn "Failed to update remote log file"
