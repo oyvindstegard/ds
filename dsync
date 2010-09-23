@@ -36,7 +36,7 @@
 #      (with some efficient heuristics for determining  actual status).
 
 # Global constants and default values.
-readonly VERSION=0.80
+readonly VERSION=0.81
 readonly LOG_FILE=".dsync.log"
 readonly CONFIG_FILE=".dsync.conf"
 readonly DEBUG=
