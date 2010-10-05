@@ -279,6 +279,12 @@ handler_gconf() {
     local tree="$1"
     unset ERRORS
 
+    if [ -z "$tree" ] || [ / = "$tree" ]; then
+        print_err "handler_gconf: database root '$tree' not allowed"
+        ERRORS="GConf tree $tree: database root not allowed"
+        return 1
+    fi
+
     local sshopts=
     [ "$GLOPT_COMP" ] && sshopts="-C"
 
@@ -286,15 +292,17 @@ handler_gconf() {
         push)
             # Transfer GConf tree to remote host
             print "Transferring GConf tree $tree to remote host $HOST"
-
             if gconftool --dir-exists "$tree"; then
                 if [ "$GLOPT_DRYRUN" ]; then
-                    print "dry run:" "gconftool --dump $tree | ssh $sshopts $HOST 'gconftool --load -; retcode=\$?; killall -HUP gconfd-2 2>/dev/null; exit \$retcode'"
+                    print "handler_gconf: dry run commands:"
+                    print "handler_gconf:" "gconftool --dump $tree | ssh $sshopts $HOST 'gconftool --unload -'"
+                    print "handler_gconf:" "gconftool --dump $tree | ssh $sshopts $HOST 'gconftool --load -; retcode=\$?; killall -HUP gconfd-2 2>/dev/null; exit \$retcode'"
                 else
-                    gconftool --dump $tree | ssh $sshopts $HOST 'gconftool --load -; retcode=$?; killall -HUP gconfd-2 2>/dev/null; exit $retcode'
+                    gconftool --dump $tree | ssh $sshopts $HOST 'gconftool --unload -'
+                    gconftool --dump $tree | ssh $sshopts $HOST "gconftool --load -; retcode=\$?; killall -HUP gconfd-2 2>/dev/null; exit \$retcode"
                     if [ $? -ne 0 ]; then
-                        print_err "handler_gconf: failed to send GConf data to host $HOST"
-                        ERRORS="GConf tree $tree: failed to send data"
+                        print_err "handler_gconf: failed to send data to host $HOST"
+                        ERRORS="GConf tree $tree: failed to send data to host $HOST"
                         return 1
                     fi
                 fi
@@ -310,22 +318,36 @@ handler_gconf() {
         fetch)
             # Load GConf-tree from remote host to local
             print "Retrieving GConf tree $tree from remote host $HOST .."
-            
+
             if ssh $sshopts $HOST "gconftool --dir-exists $tree"; then
                 if [ "$GLOPT_DRYRUN" ]; then
-                    print "dry run: ssh $sshopts $HOST 'gconftool --dump $tree' | gconftool --load -"
-                    print "dry run: killall -HUP gconfd-2"
+                    print "handler_gconf: dry run commands:"
+                    print "handler_gconf: ssh $sshopts $HOST 'gconftool --dump $tree' > <tmpfile>"
+                    print "handler_gconf: gconftool --unload <tmpfile>; gconftool --load <tmpfile>"
+                    print "handler_gconf: killall -HUP gconfd-2"
                 else
-                    ssh $sshopts $HOST "gconftool --dump $tree" | gconftool --load -
+                    local tmpfile
+                    tmpfile=`mktemp`
+                    ssh $sshopts $HOST "gconftool --dump $tree" > $tmpfile
                     if [ $? -ne 0 ]; then
                         print_err "handler_gconf: failed to retrieve GConf data from host $HOST"
                         ERRORS="GConf tree $tree: failed to retrieve data"
+                        rm -f $tmpfile
+                        return 1
+                    fi
+
+                    gconftool --unload $tmpfile; gconftool --load $tmpfile
+                    if [ $? -ne 0 ]; then
+                        print_err "handler_gconf: failed to load data into local database"
+                        ERRORS="GConf tree $tree: failed to load data into local database"
+                        rm -f $tmpfile
                         return 1
                     fi
                     killall -HUP gconfd-2
+                    rm -f $tmpfile
                 fi
             else
-                print_err "GConf tree $tree does not exist on remote host or error invoking gconftool"
+                print_err "handler_gconf: GConf tree $tree does not exist on remote host or error invoking gconftool"
                 ERRORS="GConf tree $tree does not exist on remote host or error invoking gconftool"
                 return 1
             fi
@@ -819,7 +841,7 @@ list_item_files() {
     echo "$LIST_RETVAL"
 }
 item_has_files() {
-    eval "[ -n \"\$CONF_${1}_FILE_LIST\" ]"
+    eval "[ \"\$CONF_${1}_FILE_LIST\" ]"
 }
 
 add_item_gconf_tree() {
@@ -835,7 +857,7 @@ list_item_gconf_trees() {
     echo "$LIST_RETVAL"
 }
 item_has_gconf_trees() {
-    eval "[ -n \"\$CONF_${1}_GCONF_LIST\" ]"
+    eval "[ \"\$CONF_${1}_GCONF_LIST\" ]"
 }
 
 add_item_kill() {
@@ -851,7 +873,7 @@ list_item_kills() {
     echo "$LIST_RETVAL"
 }
 item_has_kills() {
-    eval "[ -n \"\$CONF_${1}_KILL_LIST\" ]"
+    eval "[ \"\$CONF_${1}_KILL_LIST\" ]"
 }
 
 add_item_cond() {
@@ -867,7 +889,7 @@ list_item_conds() {
     echo "$LIST_RETVAL"
 }
 item_has_conds() {
-    eval "[ -n \"\$CONF_${1}_COND_LIST\" ]"
+    eval "[ \"\$CONF_${1}_COND_LIST\" ]"
 }
 
 add_item_rsync_option() {
@@ -883,7 +905,7 @@ list_item_rsync_opts() {
     echo "$LIST_RETVAL"
 }
 item_has_rsync_opts() {
-    eval "[ -n \"\$CONF_${1}_RSYNC_OPT_LIST\" ]"
+    eval "[ \"\$CONF_${1}_RSYNC_OPT_LIST\" ]"
 }
 
 # Group management
@@ -920,7 +942,7 @@ set_global_flag_false() {
 global_flag_value() {
     local flag
     flag=$1
-    eval "[ -n \"\$GLOBAL_CONF_FLAG_${flag}\" ] && [ 1 -eq \$GLOBAL_CONF_FLAG_${flag} ]"
+    eval "[ \"\$GLOBAL_CONF_FLAG_${flag}\" ] && [ 1 -eq \$GLOBAL_CONF_FLAG_${flag} ]"
 }
 
 set_item_flag_true() {
@@ -939,13 +961,13 @@ item_flag_value() {
     local item flag
     item=$1
     flag=$2
-    eval "[ -n \"\$CONF_${item}_FLAG_${flag}\" ] && [ \$CONF_${item}_FLAG_${flag} -eq 1 ]"
+    eval "[ \"\$CONF_${item}_FLAG_${flag}\" ] && [ \$CONF_${item}_FLAG_${flag} -eq 1 ]"
 }
 item_has_flag() {
     local item flag
     item=$1
     flag=$2
-    eval "[ -n \"\$CONF_${item}_FLAG_${flag}\" ]"
+    eval "[ \"\$CONF_${item}_FLAG_${flag}\" ]"
 }
 # Effective value means taking global value into consideration.
 item_flag_effective_value() {
@@ -1104,7 +1126,7 @@ parse_configuration() {
                     add_item_gconf_tree "$CURRENT_ITEM" "$val"
                 done
                 ;;
-                
+
             kill)
                 if [ -z "$CURRENT_ITEM" ]; then
                     print_err "Config: encountered $keyword keyword in global context (no corresponding item)"
