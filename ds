@@ -29,14 +29,15 @@
 # Documentation: ds -H
 #                ds conf example
 #
-# Bugs can be reported to author: Øyvind Stegard <oyvind.stegard@ifi.uio.no>
+# Bugs can be reported to author:
+# Øyvind Stegard <oyvind.stegard@ifi.uio.no>
 #
 # TODO better documentation
 # TODO item sync status check
 #      (with some efficient heuristics for determining  actual status).
 
 # Global constants and default values.
-readonly VERSION=0.85
+readonly VERSION=0.86
 readonly LOG_FILE=".ds.log"     # always relative to $HOME
 readonly CONFIG_FILE=".ds.conf" # always relative to $HOME
 readonly DEBUG=
@@ -367,7 +368,7 @@ do_command_sync() {
     [ -z "$item" ] && return 1
 
     print
-    if item_flag_value $item always_ask; then
+    if item_flag_effective_value $item always_ask || [ "$GLOPT_INT" ]; then
         if [ $OP = push ] && ! ask_ynq "Push item $item to host $HOST ?"; then
             continue
         fi
