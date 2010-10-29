@@ -23,7 +23,7 @@
 # - Bourne-compatible shell (sh). GNU bash not required (code should be free of
 #   "bashisms"). Tested with the dash shell.
 # - rsync for file/directory sync (tested with version 3.0.3)
-# - gconftool for sync of GConf-trees (optional).
+# - gconftool-2 for sync of GConf-trees (optional).
 # - ssh, preferably set up with public key authentication for remote hosts.
 #
 # Documentation: ds -H
@@ -269,9 +269,9 @@ $1"
 handler_gconf() {
     reset_IFS
 
-    # Check that we have gconftool or gconftool locally at least.
-    type gconftool 1>/dev/null 2>&1 || {
-        print_err "Missing required dependency for GConf-sync: gconftool"
+    # Check that we have gconftool-2 locally at least.
+    type gconftool-2 1>/dev/null 2>&1 || {
+        print_err "Missing required dependency for GConf-sync: gconftool-2"
         print_err "It has to be available somewhere in your PATH."
         return 255
     }
@@ -292,14 +292,14 @@ handler_gconf() {
         push)
             # Transfer GConf tree to remote host
             print "Transferring GConf tree $tree to remote host $HOST"
-            if gconftool --dir-exists "$tree"; then
+            if gconftool-2 --dir-exists "$tree"; then
                 if [ "$GLOPT_DRYRUN" ]; then
                     print "handler_gconf: dry run commands:"
-                    print "handler_gconf:" "gconftool --dump $tree | ssh $sshopts $HOST 'gconftool --unload -'"
-                    print "handler_gconf:" "gconftool --dump $tree | ssh $sshopts $HOST 'gconftool --load -; retcode=\$?; killall -HUP gconfd-2 2>/dev/null; exit \$retcode'"
+                    print "handler_gconf:" "gconftool-2 --dump $tree | ssh $sshopts $HOST 'gconftool-2 --unload -'"
+                    print "handler_gconf:" "gconftool-2 --dump $tree | ssh $sshopts $HOST 'gconftool-2 --load -; retcode=\$?; killall -HUP gconfd-2 2>/dev/null; exit \$retcode'"
                 else
-                    gconftool --dump $tree | ssh $sshopts $HOST 'gconftool --unload -'
-                    gconftool --dump $tree | ssh $sshopts $HOST "gconftool --load -; retcode=\$?; killall -HUP gconfd-2 2>/dev/null; exit \$retcode"
+                    gconftool-2 --dump $tree | ssh $sshopts $HOST 'gconftool-2 --unload -'
+                    gconftool-2 --dump $tree | ssh $sshopts $HOST "gconftool-2 --load -; retcode=\$?; killall -HUP gconfd-2 2>/dev/null; exit \$retcode"
                     if [ $? -ne 0 ]; then
                         print_err "handler_gconf: failed to send data to host $HOST"
                         ERRORS="GConf tree $tree: failed to send data to host $HOST"
@@ -307,8 +307,8 @@ handler_gconf() {
                     fi
                 fi
             else
-                print_err "GConf tree $tree does not exist locally or error invoking gconftool"
-                ERRORS="GConf tree $tree does not exist locally or error invoking gconftool"
+                print_err "GConf tree $tree does not exist locally or error invoking gconftool-2"
+                ERRORS="GConf tree $tree does not exist locally or error invoking gconftool-2"
                 return 1
             fi
 
@@ -319,16 +319,16 @@ handler_gconf() {
             # Load GConf-tree from remote host to local
             print "Retrieving GConf tree $tree from remote host $HOST .."
 
-            if ssh $sshopts $HOST "gconftool --dir-exists $tree"; then
+            if ssh $sshopts $HOST "gconftool-2 --dir-exists $tree"; then
                 if [ "$GLOPT_DRYRUN" ]; then
                     print "handler_gconf: dry run commands:"
-                    print "handler_gconf: ssh $sshopts $HOST 'gconftool --dump $tree' > <tmpfile>"
-                    print "handler_gconf: gconftool --unload <tmpfile>; gconftool --load <tmpfile>"
+                    print "handler_gconf: ssh $sshopts $HOST 'gconftool-2 --dump $tree' > <tmpfile>"
+                    print "handler_gconf: gconftool-2 --unload <tmpfile>; gconftool-2 --load <tmpfile>"
                     print "handler_gconf: killall -HUP gconfd-2"
                 else
                     local tmpfile
                     tmpfile=`mktemp`
-                    ssh $sshopts $HOST "gconftool --dump $tree" > $tmpfile
+                    ssh $sshopts $HOST "gconftool-2 --dump $tree" > $tmpfile
                     if [ $? -ne 0 ]; then
                         print_err "handler_gconf: failed to retrieve GConf data from host $HOST"
                         ERRORS="GConf tree $tree: failed to retrieve data"
@@ -336,7 +336,8 @@ handler_gconf() {
                         return 1
                     fi
 
-                    gconftool --unload $tmpfile; gconftool --load $tmpfile
+                    gconftool-2 --unload $tmpfile
+                    gconftool-2 --load $tmpfile
                     if [ $? -ne 0 ]; then
                         print_err "handler_gconf: failed to load data into local database"
                         ERRORS="GConf tree $tree: failed to load data into local database"
@@ -347,8 +348,8 @@ handler_gconf() {
                     rm -f $tmpfile
                 fi
             else
-                print_err "handler_gconf: GConf tree $tree does not exist on remote host or error invoking gconftool"
-                ERRORS="GConf tree $tree does not exist on remote host or error invoking gconftool"
+                print_err "handler_gconf: GConf tree $tree does not exist on remote host or error invoking gconftool-2"
+                ERRORS="GConf tree $tree does not exist on remote host or error invoking gconftool-2"
                 return 1
             fi
 
@@ -1744,7 +1745,7 @@ usage() {
     print "ds v$VERSION"
     print
     print "ds is a command line tool for manual, but quick and easy one-way syncing/mirroring"
-    print "of data to/from remote hosts. It uses rsync(1), ssh(1) and gconftool(1) to accomplish"
+    print "of data to/from remote hosts. It uses rsync(1), ssh(1) and gconftool-2(1) to accomplish"
     print "its tasks."
     print
     print -n "Use: `basename $0`"; print_green -n " [options] "
@@ -2132,3 +2133,4 @@ case "$COMMAND" in
 esac
 
 exit 0
+
