@@ -935,15 +935,15 @@ set_global_flag_true  ask_before_kill
 
 # Word tokenizer for config file. Tokens are separated by newlines, and
 # syntactically significant newlines are represented by token '<<<EoS>>>'
-# (EndofStanza). Supports quoted words and quote-escaping.
+# (EndofStanza). Supports quoted words and quote-escaping and comment removal.
 readonly EOS='<<<EoS>>>'
 token_stream() {
     awk '
       BEGIN { FS=""; }
       /^[ 	]*[^ 	]/ {
           for (i=1; i<=NF; i++) {
-              if ($i == "#") { print "'"$EOS"'"; next; }
               if (esc) { word = word $i; esc=0; continue; }
+              if ($i == "#" && !iq) { if (word) {print word; word=""; } print "'"$EOS"'"; next; }
               if ($i == "\\") {
                   esc=1;
               } else if ($i == "\"" || $i == "'\''") {
