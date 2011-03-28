@@ -384,12 +384,11 @@ do_command_sync() {
         newline_IFS
         for cond in `list_property_values ITEM $item CONDS`; do
             reset_IFS
-            local output retval
-            output=`eval "$cond"`
+            local retval
+            eval "$cond" # run cond
             retval=$?
-            [ -z "$output" ] && output=$cond
             if [ $retval -ne 0 ]; then
-                print_warn "Item pre-condition failed:"; print "$output"; print
+                print_warn "Item pre-condition failed with exit code $retval:"; print "   $cond"; print
                 ask_ynq "Do you wish to skip this item ?"
                 if [ $? -eq 0 ]; then
                     continue 2
