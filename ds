@@ -23,8 +23,11 @@
 # - Bourne-compatible shell (sh). GNU bash not required (code should be free of
 #   "bashisms"). Tested with the dash shell.
 # - rsync for file/directory sync (tested with version 3.0.3)
-# - gconftool-2 for sync of GConf-trees (optional).
-# - ssh, preferably set up with public key authentication for remote hosts.
+# - ssh, preferably set up with public key authentication and ssh-agent to remote hosts
+#   to avoid having to type password many times per run.
+#
+# - gconftool-2 for sync of GConf-trees (optional, works only on Linux-based systems).
+# - dconf for sync of dconf trees       (optional, works only on Linux-based systems).
 #
 # Documentation: ds -H
 #                ds conf example
@@ -35,9 +38,10 @@
 # TODO better documentation
 # TODO item sync status check
 #      (with some efficient heuristics for determining  actual status).
+# TODO better logging of groups
 
 # Global constants and default values.
-readonly VERSION=0.9
+readonly VERSION=0.9.5
 readonly LOG_FILE=".ds.log"     # always relative to $HOME
 readonly CONFIG_FILE=".ds.conf" # always relative to $HOME
 readonly DEBUG=
@@ -265,7 +269,186 @@ $1"
     [ "$ERRORS" ] && return 1 || return 0
 }
 
+# Utility functions for working with local and remote DBUS sessions (required for dconf):
+DBUS_REMOTE_SESSION_PID=
+DBUS_REMOTE_SESSION_ADDRESS=
+dbus_open_remote_session() {
+    local tmpfile addr pid
+    if [ "$DBUS_REMOTE_SESSION_ADDRESS" ]; then
+        return 0 # a remote dbus session already available
+    fi
+    
+    tmpfile=`mktemp`
+    # Try to obtain address of any running dbus instance on remote host first
+    ssh -x $HOST 'set -e;U=`id -nu`;DCPID=`pgrep -o -u $U dconf-service`;test "$DCPID" -a -f /proc/$DCPID/environ;xargs -0 -n1 -a /proc/$DCPID/environ|grep DBUS_SESSION_BUS_ADDRESS|cut -d= -f2-' > $tmpfile
+    addr=`cat $tmpfile`
+    if [ "$addr" ]; then
+        # found already running remote session bus, use that
+        DBUS_REMOTE_SESSION_ADDRESS=$addr
+        DBUS_REMOTE_SESSION_PID=
+        rm -f $tmpfile
+        return 0
+    fi
+
+    # No running dbus session found on remote host, set up our own
+    ssh -x $HOST 'dbus-daemon --session --fork --print-pid --print-address' > $tmpfile
+    addr=`head -n1 $tmpfile`
+    pid=`tail -n1 $tmpfile`
+    if [ -z "$addr" ] || [ -z "$pid" ]; then
+        print_err "dbus_open_remote_session: failed to start dbus-daemon on remote host"
+        rm -f $tmpfile
+        return 2
+    fi
+    rm -f $tmpfile
+
+    DBUS_REMOTE_SESSION_PID=$pid
+    DBUS_REMOTE_SESSION_ADDRESS=$addr
+    return 0
+}
+
+dbus_close_remote_session() {
+    if [ "$DBUS_REMOTE_SESSION_PID" ]; then
+        # We have started a remote dbus session ourselves, kill it
+        ssh -x $HOST "kill $DBUS_REMOTE_SESSION_PID 2>/dev/null" || print_warn "dbus_close_remote_session: failed to kill remotely started dbus-daemon with pid $DBUS_REMOTE_SESSION_PID"
+        DBUS_REMOTE_SESSION_PID=
+    fi
+    DBUS_REMOTE_SESSION_ADDRESS=
+}
+
+DBUS_LOCAL_SESSION_ADDRESS=
+DBUS_LOCAL_SESSION_PID=
+dbus_open_local_session() {
+    if [ "$DBUS_LOCAL_SESSION_ADDRESS" ]; then
+        # local session already available
+        return 0
+    fi
+
+    local tmpfile addr pid
+    if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
+        # no local dbus-daemon available, start one up
+        tmpfile=`mktemp`
+        dbus-daemon --session --fork --print-pid --print-address > $tmpfile
+        if [ $? -ne 0 ]; then
+            print_err "dbus_open_local_session: failed to start dbus-daemon on local host"
+            rm -f $tmpfile
+            return 1
+        fi
+        addr=`head -n1 $tmpfile`
+        pid=`tail -n1 $tmpfile`
+        if [ -z "$addr" ] || [ -z "$pid" ]; then
+            print_err "dbus_open_local_session: failed to start dbus-daemon on local host"
+            rm -f $tmpfile
+            return 2
+        fi
+        rm -f $tmpfile
+        DBUS_LOCAL_SESSION_PID=$pid
+        DBUS_LOCAL_SESSION_ADDRESS=$addr
+    else
+        # local session already available
+        DBUS_LOCAL_SESSION_ADDRESS=$DBUS_SESSION_BUS_ADDRESS
+        DBUS_LOCAL_SESSION_PID=
+    fi
+    return 0
+}
+
+dbus_close_local_session() {
+    if [ "$DBUS_LOCAL_SESSION_PID" ]; then
+        kill $DBUS_LOCAL_SESSION_PID || print_warn "dbus_close_local_session: failed to kill locally started dbus-daemon"
+        DBUS_LOCAL_SESSION_PID=
+    fi
+    DBUS_LOCAL_SESSION_ADDRESS=
+}
+
+# Handle dconf trees
+handler_dconf() {
+    reset_IFS
+
+    type dconf 1>/dev/null 2>&1 || {
+        print_err "Missing required dependency for dconf sync: dconf"
+        print_err "It has to be available somewhere in your PATH."
+        return 255
+    }
+
+    local tree="$1"
+    unset ERRORS
+
+    if [ -z "$tree" ] || [ / = "$tree" ]; then
+        print_err "handler_dconf: database root '$tree' not allowed"
+        ERRORS="dconf tree $tree: database root not allowed"
+        return 1
+    fi
+
+    if [ "${tree%/}" = "$tree" ]; then
+        # we only support trees, so add the last slash:
+        tree="$tree/"
+    fi
+
+    local sshopts="-x"
+    [ "$GLOPT_COMP" ] && sshopts="$sshopts -C"
+
+    case $OP in
+        push)
+            # Transfer dconf tree to remote host
+            print "Transferring dconf tree $tree to remote host $HOST"
+
+            dbus_open_remote_session
+            if [ $? -ne 0 ]; then
+                print_err "handler_dconf: unable to acquire remote dbus session"
+                return 1
+            fi
+            
+            if [ "$GLOPT_DRYRUN" ]; then
+                print "handler_dconf: dry run commands:"
+                print "handler_dconf:" "dconf dump $tree | ssh $sshopts $HOST 'DBUS_SESSION_BUS_ADDRESS=$DBUS_REMOTE_SESSION_ADDRESS dconf load $tree'"
+            else
+                dconf dump "$tree" | ssh $sshopts $HOST "DBUS_SESSION_BUS_ADDRESS=$DBUS_REMOTE_SESSION_ADDRESS dconf load $tree"
+                if [ $? -ne 0 ]; then
+                    print_err "handler_dconf: failed to send data to host $HOST"
+                    ERRORS="dconf tree $tree: failed to send data to host $HOST"
+                    dbus_close_remote_session
+                    return 1
+                fi
+            fi
+
+            dbus_close_remote_session
+            return 0
+            ;;
+
+        fetch)
+            # Retrieve dconf tree from remote host
+            print "Retrieving dconf tree $tree from remote host $HOST"
+
+            dbus_open_local_session
+            if [ $? -ne 0 ]; then
+                print_err "handler_dconf: unable to acquire local dbus session"
+                return 1
+            fi
+            
+            if [ "$GLOPT_DRYRUN" ]; then
+                print "handler_dconf: dry run commands:"
+                print "handler_dconf:" "ssh $sshopts $HOST 'dconf dump $tree'|DBUS_SESSION_BUS_ADDRESS=$DBUS_LOCAL_SESSION_ADDRESS dconf load $tree"
+            else
+                ssh $sshopts $HOST "dconf dump $tree" |DBUS_SESSION_BUS_ADDRESS=$DBUS_LOCAL_SESSION_ADDRESS dconf load "$tree"
+                if [ $? -ne 0 ]; then
+                    print_err "handler_dconf: failed to retrieve dconf data from host $HOST"
+                    ERRORS="dconf tree $tree: failed to retrieve dconf data from host $HOST"
+                    dbus_close_local_session
+                    return 1
+                fi
+            fi
+
+            dbus_close_local_session
+            return 0
+            ;;
+        
+        *)
+            return 2
+            ;;
+    esac
+}
+
 # Handle GConf-trees
+# DEPRECATED in favour of dconf
 handler_gconf() {
     reset_IFS
 
@@ -285,8 +468,8 @@ handler_gconf() {
         return 1
     fi
 
-    local sshopts=
-    [ "$GLOPT_COMP" ] && sshopts="-C"
+    local sshopts="-x"
+    [ "$GLOPT_COMP" ] && sshopts="$sshopts -C"
 
     case $OP in
         push)
@@ -451,6 +634,21 @@ do_command_sync() {
             handler_gconf "$tree"
             if [ $? -ne 0 ]; then
                 print_warn "Sync of GConf tree $tree failed"
+                logmsg="${logmsg:+$logmsg, }$ERRORS"
+            else
+                print_green OK
+            fi
+        done
+    fi
+    # Do dconf trees
+    if property_values_exist ITEM $item DCONF_TREES; then
+        local tree
+        newline_IFS
+        for tree in `list_property_values ITEM $item DCONF_TREES`; do
+            reset_IFS
+            handler_dconf "$tree"
+            if [ $? -ne 0 ]; then
+                print_warn "Sync of dconf tree $tree failed"
                 logmsg="${logmsg:+$logmsg, }$ERRORS"
             else
                 print_green OK
@@ -1071,6 +1269,22 @@ parse_configuration() {
                     add_property_value ITEM "$CURRENT_ITEM" GCONF_TREES "$val"
                 done
                 ;;
+            
+            dconf)
+                if [ -z "$CURRENT_ITEM" ]; then
+                    print_err "Config: encountered $keyword keyword in global context (no corresponding item)"
+                    return 1
+                fi
+                if [ -z "$values" ]; then
+                    print_err "Config (item $CURRENT_ITEM): $keyword keyword missing argument(s)"
+                    return 1
+                fi
+                list_elements values
+
+                for val in $LIST_RETVAL; do
+                    add_property_value ITEM "$CURRENT_ITEM" DCONF_TREES "$val"
+                done
+                ;;
 
             kill)
                 if [ -z "$CURRENT_ITEM" ]; then
@@ -1211,12 +1425,12 @@ item Firefox
                                                   # match the command you want killed.
      ask_before_kill false                        # Don't ask if we want to kill any running, just do it.
 
-item Evolution
-     directory .evolution                                 # Evolution data files
-     gconf /apps/evolution                                # Evolution gconf configuration
-     kill '/usr/lib/evolution/evolution-data-server-2.24' 
-     kill '^(/usr/bin/)?evolution ?'                      # Multiple kill statements per item allowed
-     always_ask true                                      # Always ask interactively before syncing this particular item
+item Shotwell
+     directory .shotwell                                 # Shotwell data files
+     dconf /apps/shotwell/                               # Shotwell configuration data
+     kill 'shotwell' 
+     kill 'something-else'                               # Multiple kill statements per item allowed
+     always_ask true                                     # Always ask interactively before syncing this particular item
 
 
 # A secure file system mounted ontop of an encrypted file:
@@ -1637,6 +1851,9 @@ conf_print_item() {
     for tree in `list_property_values ITEM $item GCONF_TREES`; do
         print_yellow -n "  GConf-tree  "; print "$tree"
     done
+    for tree in `list_property_values ITEM $item DCONF_TREES`; do
+        print_yellow -n "  dconf tree  "; print "$tree"
+    done
 
     for kill in `list_property_values ITEM $item KILLS`; do
         print_red -n "  Kill "
@@ -1744,8 +1961,8 @@ usage() {
     print "ds v$VERSION"
     print
     print "ds is a command line tool for manual, but quick and easy one-way syncing/mirroring"
-    print "of data to/from remote hosts. It uses rsync(1), ssh(1) and gconftool-2(1) to accomplish"
-    print "its tasks."
+    print "of data to/from remote hosts. It primarily uses rsync(1) and ssh(1) to accomplish"
+    print "its tasks. GConf and dconf sync requires a typical Linux desktop installation (optional)."
     print
     print -n "Use: `basename $0`"; print_green -n " [options] "
     print_cyan -n "COMMAND"
