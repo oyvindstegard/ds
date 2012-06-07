@@ -1999,7 +1999,7 @@ usage() {
         print "      If you would like to do two-way syncing for some items, you can override this"
         print "      default behaviour by setting the options 'target_deletes' and 'force_update'"
         print "      to false in the item configuration. You can then accomplish two-way syncing"
-        print "      by first doing a 'push', then a 'fetch'. Or you can supply the "; print_green -n "option "; print "'-u'"
+        print -n "      by first doing a 'push', then a 'fetch'. Or you can supply the "; print_green -n "option "; print "'-u'"
         print "      when invoking ds from the command line, which will enable this behaviour"
         print "      (and override anything set in config) for that run."
         print
