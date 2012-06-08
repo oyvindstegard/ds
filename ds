@@ -41,7 +41,7 @@
 # TODO better logging of groups
 
 # Global constants and default values.
-readonly VERSION=0.9.5
+readonly VERSION=0.9.5-log-rework
 readonly LOG_FILE=".ds.log"     # always relative to $HOME
 readonly CONFIG_FILE=".ds.conf" # always relative to $HOME
 readonly DEBUG=
