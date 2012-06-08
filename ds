@@ -725,10 +725,10 @@ log_hook() {
     [ "$message" ] && message=", $message"
     case $OP in
         push)
-            echo "`log_date` --> PUSH item $CURRENT_ITEM to host $HOST$message" >> "$HOME/$LOG_FILE"
+            echo "`log_date` --> PUSH ${CURRENT_GROUP:+group $CURRENT_GROUP }item $CURRENT_ITEM to host $HOST$message" >> "$HOME/$LOG_FILE"
 
             # Update remote log file
-            echo "`log_date` <-- REMOTE_PUSH item $CURRENT_ITEM from host `hostname`$message" |\
+            echo "`log_date` <-- REMOTE_PUSH ${CURRENT_GROUP:+group $CURRENT_GROUP }item $CURRENT_ITEM from host `hostname`$message" |\
                  ssh $HOST "cat - >> $LOG_FILE"
             if [ $? -ne 0 ]; then
                 print_warn "Failed to update remote log file"
@@ -736,10 +736,10 @@ log_hook() {
             ;;
 
         fetch)
-            echo "`log_date` <-- FETCH item $CURRENT_ITEM from host $HOST$message" >> "$HOME/$LOG_FILE"
+            echo "`log_date` <-- FETCH ${CURRENT_GROUP:+group $CURRENT_GROUP }item $CURRENT_ITEM from host $HOST$message" >> "$HOME/$LOG_FILE"
 
             # Update remote log file
-            echo "`log_date` --> REMOTE_FETCH item $CURRENT_ITEM from host `hostname`$message" |\
+            echo "`log_date` --> REMOTE_FETCH ${CURRENT_GROUP:+group $CURRENT_GROUP }item $CURRENT_ITEM from host `hostname`$message" |\
                  ssh $HOST "cat - >> $LOG_FILE"
             if [ $? -ne 0 ]; then
                 print_warn "Failed to update remote log file"
@@ -748,58 +748,100 @@ log_hook() {
     esac
 }
 
-log_hook_group() {
-    { [ "$GLOPT_DRYRUN" ] || [ "$GLOPT_NOLOG" ]; } && return 0 # Log nothing if dry run or --nolog option.
-    case $OP in
-        push)
-            echo "`log_date` --> PUSH group $CURRENT_GROUP to host $HOST" >> "$HOME/$LOG_FILE"
+# log_hook_group() {
+#     { [ "$GLOPT_DRYRUN" ] || [ "$GLOPT_NOLOG" ]; } && return 0 # Log nothing if dry run or --nolog option.
+#     case $OP in
+#         push)
+#             echo "`log_date` --> PUSH group $CURRENT_GROUP to host $HOST" >> "$HOME/$LOG_FILE"
 
-            # Update remote log file
-            echo "`log_date` <-- REMOTE_PUSH group $CURRENT_GROUP from host `hostname`" |\
-                 ssh $HOST "cat - >> $LOG_FILE"
-            if [ $? -ne 0 ]; then
-                print_warn "Failed to update remote log file"
-            fi
-            ;;
+#             # Update remote log file
+#             echo "`log_date` <-- REMOTE_PUSH group $CURRENT_GROUP from host `hostname`" |\
+#                  ssh $HOST "cat - >> $LOG_FILE"
+#             if [ $? -ne 0 ]; then
+#                 print_warn "Failed to update remote log file"
+#             fi
+#             ;;
 
-        fetch)
-            echo "`log_date` <-- FETCH group $CURRENT_GROUP from host $HOST" >> "$HOME/$LOG_FILE"
+#         fetch)
+#             echo "`log_date` <-- FETCH group $CURRENT_GROUP from host $HOST" >> "$HOME/$LOG_FILE"
 
-            # Update remote log file
-            echo "`log_date` --> REMOTE_FETCH group $CURRENT_GROUP from host `hostname`" |\
-                 ssh $HOST "cat - >> $LOG_FILE"
-            if [ $? -ne 0 ]; then
-                print_warn "Failed to update remote log file"
-            fi
-            ;;
-    esac
-}
+#             # Update remote log file
+#             echo "`log_date` --> REMOTE_FETCH group $CURRENT_GROUP from host `hostname`" |\
+#                  ssh $HOST "cat - >> $LOG_FILE"
+#             if [ $? -ne 0 ]; then
+#                 print_warn "Failed to update remote log file"
+#             fi
+#             ;;
+#     esac
+# }
 
 log_color_filter() {
     if [ -z "$GLOPT_COLORS" ] || ! [ -t 1 ]; then
         while read line; do echo "$line"; done
     else
-        while read date time direction op item_or_group_kw item_or_group tofromkw hostkw host rest; do
-            echo -n "$date $time $direction $op $item_or_group_kw "
-            if [ $item_or_group_kw = group ]; then
+        while read date time direction op a b c d e f g h; do
+            echo -n "$date $time $direction $op "
+            if [ "$a" = group ]; then
+                echo -n "group "
                 tty_color magenta
-            else
+                echo -n "$b "
+                tty_color reset
+                echo -n "item "
                 tty_color cyan
-            fi
-            echo -n "$item_or_group "
-            tty_color reset
-            if [ "${rest%OK}" != "$rest" ]; then
-                echo -n "$tofromkw $hostkw $host ${rest%OK}"
-                tty_color green
-                echo OK
+                echo -n "$d "
                 tty_color reset
+                if [ "${h%OK}" != "$h" ]; then
+                    echo -n "$e $f $g ${h%OK}"
+                    tty_color green
+                    echo OK
+                    tty_color reset
+                else
+                    echo -n "$e $f $g "
+                    tty_color red
+                    echo "$h"
+                    tty_color reset
+                fi
             else
-                echo -n "$tofromkw $hostkw $host "
-                tty_color red
-                echo "$rest"
+                echo -n "item "
+                tty_color cyan
+                echo -n "$b "
                 tty_color reset
+                rest="$f${g:+ $g}${h:+ $h}"
+                if [ "${rest%OK}" != "$rest" ]; then
+                    echo -n "$c $d $e ${rest%OK}"
+                    tty_color green
+                    echo OK
+                    tty_color reset
+                else
+                    echo -n "$c $d $e "
+                    tty_color red
+                    echo "$rest"
+                    tty_color reset
+                fi
             fi
         done
+
+        # while read date time direction op item_or_group_kw item_or_group tofromkw hostkw host rest; do
+        #     echo -n "$date $time $direction $op $item_or_group_kw "
+        #     if [ $item_or_group_kw = group ]; then
+        #         tty_color magenta
+        #     else
+        #         tty_color cyan
+        #     fi
+        #     echo -n "$item_or_group "
+        #     tty_color reset
+        #     if [ "${rest%OK}" != "$rest" ]; then
+        #         echo -n "$tofromkw $hostkw $host ${rest%OK}"
+        #         tty_color green
+        #         echo OK
+        #         tty_color reset
+        #     else
+        #         echo -n "$tofromkw $hostkw $host "
+        #         tty_color red
+        #         echo "$rest"
+        #         tty_color reset
+        #     fi
+        # done
     fi
 }
 
@@ -811,12 +853,12 @@ do_command_log() {
 
     if [ "$LOG_LASTOP" ]; then
         local lastops_tmpfile
-        lastops_tmpfile=`mktemp -t`
+        lastops_tmpfile=`mktemp`
         if [ "$HOST" ]; then
             print "Last operation per configured item or group in log on remote host: $HOST"
             print
             local tmpfile
-            tmpfile=`mktemp -t`
+            tmpfile=`mktemp`
             ssh $HOST "cat $LOG_FILE" > $tmpfile
             case $? in # FIXME: duplicated error handling code (look further down).
                 0|1) : ;; # OK
@@ -836,23 +878,31 @@ do_command_log() {
                     return 1
                     ;;
             esac
-            for item in `sort -u -k6,6 "$tmpfile"|awk '{print $6}'`; do
-                if have_item "$item"; then
-                    grep -F "item $item " "$tmpfile" | tail -n1 >> "$lastops_tmpfile"
-                elif is_group "$item"; then
-                    grep -F "group $item" "$tmpfile" | tail -n1 >> "$lastops_tmpfile"
-                fi
+            # for item in `sort -u -k6,6 "$tmpfile"|awk '{print $6}'`; do
+            #     if have_item "$item"; then
+            #         grep -F "item $item " "$tmpfile" | tail -n1 >> "$lastops_tmpfile"
+            #     elif is_group "$item"; then
+            #         grep -F "group $item" "$tmpfile" | tail -n1 >> "$lastops_tmpfile"
+            #     fi
+            # done
+            for item in `list_items`; do
+                fgrep " item $item" "$tmpfile"|tail -n1 >> "$lastops_tmpfile"
             done
+            
             rm -f $tmpfile
         else
             print "Last operation per configured item or group in local log"
             print
-            for item in `sort -u -k6,6 "$HOME/$LOG_FILE"|awk '{print $6}'`; do
-                if have_item "$item"; then
-                    grep -F "item $item " "$HOME/$LOG_FILE" | tail -n1 >> "$lastops_tmpfile"
-                elif is_group "$item"; then
-                    grep -F "group $item " "$HOME/$LOG_FILE" | tail -n1 >> "$lastops_tmpfile"
-                fi
+            # for item in `sort -u -k6,6 "$HOME/$LOG_FILE"|awk '{print $6}'`; do
+            #     if have_item "$item"; then
+            #         grep -F "item $item " "$HOME/$LOG_FILE" | tail -n1 >> "$lastops_tmpfile"
+            #     elif is_group "$item"; then
+            #         grep -F "group $item " "$HOME/$LOG_FILE" | tail -n1 >> "$lastops_tmpfile"
+            #     fi
+            # done
+
+            for item in `list_items`; do
+                fgrep " item $item" "$HOME/$LOG_FILE"|tail -n1 >> "$lastops_tmpfile"
             done
         fi
         sort -k1,2 "$lastops_tmpfile" | log_color_filter
@@ -889,7 +939,7 @@ do_command_log() {
     local tmpfile=
     local logfile="$HOME/$LOG_FILE"
     if [ "$HOST" ]; then
-        tmpfile=`mktemp -t`
+        tmpfile=`mktemp`
         ssh $HOST cat $LOG_FILE > $tmpfile
         case $? in
             0|1) : ;; # OK
@@ -2224,7 +2274,7 @@ case "$COMMAND" in
         for selection in $selections; do
             if is_group $selection; then
                 CURRENT_GROUP=$selection
-                log_hook_group
+                #log_hook_group
                 for item in `list_group_items $selection`; do
                     CURRENT_ITEM=$item
                     print 
