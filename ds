@@ -125,6 +125,23 @@ path_escape_compatible() {
 }
 
 # Handle files and directories
+# If OP is 'stat', then the following applies:
+#   Retcode 0: no changes locally or remotely
+#   Retcode 1: local file changes only
+#   Retcode 2: remote file changes only
+#   Retcode 3: both local or remote file changes
+#   Retcode 4: unknown
+#   Variable CHANGES_PUSH will contain list of
+#   changes which would be sent to remote host on push.
+#   Variable CHANGES_FETCH will contain list of
+#   changes which would be done locally on fetch.
+#
+# If OP is 'push' or 'fetch', then variable ERRORS will contain any error
+# messages if rsync fails.
+#
+# Retcode 10 if rsync fails for any OP.
+# Retcode 100 for invalid OP.
+#
 handler_file() {
     # Check that we have rsync
     type rsync 1>/dev/null 2>&1 || {
@@ -141,10 +158,10 @@ handler_file() {
     cd "$oldpwd"              # Jump back
     return $retval
 }
-handler_file_internal() {
+handler_file_internal(){
     local opts relative_paths= absolute_paths= relpaths_disp=
     opts=$RSYNC_EXTRA_OPTS
-    unset ERRORS
+    unset ERRORS CHANGES_PUSH CHANGES_FETCH
 
     # RSync command line opts is newline-separated. We bend over backwards to
     # properly support file names with spaces in them, while also batching
@@ -166,7 +183,7 @@ handler_file_internal() {
 
     while [ "$1" ]; do
         case $OP in
-            push)
+            push|stat)
                 if [ "${1#/}" = "$1" ]; then
                     relative_paths="$relative_paths
 $1"
@@ -194,9 +211,100 @@ $1"
         shift
     done
 
+    
     local retcode
-    # FIXME: --protect-args is only compatible with recent rsync versions, stay compatible and work-around by escaping instead.
+    # NOTE: --protect-args is only compatible with newer rsync versions, stay compatible and work-around by escaping instead.
     case $OP in
+        stat)
+            local local_file_changes= remote_file_changes= output
+            opts="--archive
+--existing
+--update
+--itemize-changes
+--dry-run"
+            if [ "$relative_paths" ]; then
+                newline_IFS
+                # Check if any local file which also exists remotely is newer
+                output=`rsync -auOi --existing --relative --no-implied-dirs $relative_paths "$HOST:"`
+                retcode=$?
+                if [ $retcode -ne 0 ]; then
+                    print_err "handler_file: rsync failed with error $retcode (path list: $relpaths_disp)"
+                    return 10
+                fi
+                if [ "$output" ]; then
+                    local_file_changes=1
+                    CHANGES_PUSH="$CHANGES_PUSH
+$output"
+                fi
+
+                # Check if remote is newer
+                local remote_relative_paths path escaped_path
+                for path in $relative_paths; do
+                    escaped_path=`path_escape_compatible "$path"`
+                    remote_relative_paths="$remote_relative_paths
+$HOST:$escaped_path"
+                done
+                
+                output=`rsync -auOi --existing --relative --no-implied-dirs $remote_relative_paths .`
+                if [ $retcode -ne 0 ]; then
+                    print_err "handler_file: rsync failed with error $retcode (path list: $relpaths_disp)"
+                    return 10
+                fi
+                if [ "$output" ]; then
+                    remote_file_changes=1
+                    CHANGES_FETCH="$CHANGES_FETCH
+$output"
+                fi
+                reset_IFS
+            fi
+
+            if [ "$absolute_paths" ]; then
+                local abspath abspath_escaped
+                newline_IFS
+                for abspath in "$absolute_paths"; do
+                    abspath_escaped=`path_escape_compatible "$abspath"`
+                    
+                    # Check if local is newer
+                    output=`rsync $opts $abspath "$HOST:$abspath_escaped"`
+                    if [ $retcode -ne 0 ]; then
+                        print_err "handler_file: rsync failed with error $retcode (path: $abspath)"
+                        return 10
+                    fi
+                    if [ "$output" ]; then
+                        have_local_changes=1
+                        CHANGES_PUSH="$CHANGES_PUSH
+$output"
+                    fi
+
+                    
+                    # Check if remote is newer
+                    output=`rsync $opts "$HOST:$abspath_escaped" "$abspath"`
+                    if [ $retcode -ne 0 ]; then
+                        print_err "handler_file: rsync failed with error $retcode (path: $abspath)"
+                        return 10
+                    fi
+                    
+                    if [ "$output" ]; then
+                        have_remote_changes=1
+                        CHANGES_FETCH="$CHANGES_FETCH
+$output"
+                    fi
+                done
+                reset_IFS
+            fi
+
+            if [ "$have_local_changes" ] && [ "$have_remote_changes" ]; then
+                return 3
+            elif [ "$have_local_changes" ] && [ -z "$have_remote_changes" ]; then
+                return 1
+            elif [ -z "$have_local_changes" ] && [ "$have_remote_changes" ]; then
+                return 2
+            else
+                return 0
+            fi
+            ;;
+
+        
         push)
             if [ "$relative_paths" ]; then
                 print "Pushing to remote host $HOST:" $relpaths_disp
@@ -262,11 +370,11 @@ $1"
             ;;
         
         *)
-            return 2
+            return 100
             ;;
     esac
 
-    [ "$ERRORS" ] && return 1 || return 0
+    [ "$ERRORS" ] && return 10 || return 0
 }
 
 # Utility functions for working with local and remote DBUS sessions (required for dconf):
@@ -544,6 +652,47 @@ handler_gconf() {
     esac
 }
 
+# Execute stat
+do_command_stat() {
+    local retcode
+    [ -z "$CURRENT_ITEM" ] && return 1
+
+    # Do sync status for files/dirs
+    if property_values_exist ITEM $CURRENT_ITEM FILES; then
+        newline_IFS
+        handler_file `list_property_values ITEM $CURRENT_ITEM FILES`
+        retcode=$?
+        case $retcode in
+            0)
+                print_green "   In sync"
+                ;;
+            1)
+                print -n "<  ";print "Updated locally"
+                if [ "$GLOPT_VERB" ]; then
+                    print "$CHANGES_PUSH"
+                fi
+                ;;
+            2)
+                print -n " > ";print_yellow "Updated remotely"
+                if [ "$GLOPT_VERB" ]; then
+                    print "$CHANGES_FETCH"
+                fi
+                ;;
+            3)
+                print -n "<> ";print_red "Updated both locally and remotely."
+                if [ "$GLOPT_VERB" ]; then
+                    print "$CHANGES_PUSH"
+                    print "$CHANGES_FETCH"
+                fi
+                ;;
+            *)
+                print_warn "File handler reported errors while checking status"
+                ;;
+        esac
+        reset_IFS
+    fi
+}
+
 # Execute sync
 # Variable CURRENT_ITEM should hold the name of item to sync
 do_command_sync() {
@@ -725,10 +874,10 @@ log_hook() {
     [ "$message" ] && message=", $message"
     case $OP in
         push)
-            echo "`log_date` --> PUSH ${CURRENT_GROUP:+group $CURRENT_GROUP }item $CURRENT_ITEM to host $HOST$message" >> "$HOME/$LOG_FILE"
+            echo "`log_date` <  PUSH ${CURRENT_GROUP:+group $CURRENT_GROUP }item $CURRENT_ITEM to host $HOST$message" >> "$HOME/$LOG_FILE"
 
             # Update remote log file
-            echo "`log_date` <-- REMOTE_PUSH ${CURRENT_GROUP:+group $CURRENT_GROUP }item $CURRENT_ITEM from host `hostname`$message" |\
+            echo "`log_date`  > REMOTE_PUSH ${CURRENT_GROUP:+group $CURRENT_GROUP }item $CURRENT_ITEM from host `hostname`$message" |\
                  ssh $HOST "cat - >> $LOG_FILE"
             if [ $? -ne 0 ]; then
                 print_warn "Failed to update remote log file"
@@ -736,10 +885,10 @@ log_hook() {
             ;;
 
         fetch)
-            echo "`log_date` <-- FETCH ${CURRENT_GROUP:+group $CURRENT_GROUP }item $CURRENT_ITEM from host $HOST$message" >> "$HOME/$LOG_FILE"
+            echo "`log_date`  > FETCH ${CURRENT_GROUP:+group $CURRENT_GROUP }item $CURRENT_ITEM from host $HOST$message" >> "$HOME/$LOG_FILE"
 
             # Update remote log file
-            echo "`log_date` --> REMOTE_FETCH ${CURRENT_GROUP:+group $CURRENT_GROUP }item $CURRENT_ITEM from host `hostname`$message" |\
+            echo "`log_date` <  REMOTE_FETCH ${CURRENT_GROUP:+group $CURRENT_GROUP }item $CURRENT_ITEM from host `hostname`$message" |\
                  ssh $HOST "cat - >> $LOG_FILE"
             if [ $? -ne 0 ]; then
                 print_warn "Failed to update remote log file"
@@ -747,33 +896,6 @@ log_hook() {
             ;;
     esac
 }
-
-# log_hook_group() {
-#     { [ "$GLOPT_DRYRUN" ] || [ "$GLOPT_NOLOG" ]; } && return 0 # Log nothing if dry run or --nolog option.
-#     case $OP in
-#         push)
-#             echo "`log_date` --> PUSH group $CURRENT_GROUP to host $HOST" >> "$HOME/$LOG_FILE"
-
-#             # Update remote log file
-#             echo "`log_date` <-- REMOTE_PUSH group $CURRENT_GROUP from host `hostname`" |\
-#                  ssh $HOST "cat - >> $LOG_FILE"
-#             if [ $? -ne 0 ]; then
-#                 print_warn "Failed to update remote log file"
-#             fi
-#             ;;
-
-#         fetch)
-#             echo "`log_date` <-- FETCH group $CURRENT_GROUP from host $HOST" >> "$HOME/$LOG_FILE"
-
-#             # Update remote log file
-#             echo "`log_date` --> REMOTE_FETCH group $CURRENT_GROUP from host `hostname`" |\
-#                  ssh $HOST "cat - >> $LOG_FILE"
-#             if [ $? -ne 0 ]; then
-#                 print_warn "Failed to update remote log file"
-#             fi
-#             ;;
-#     esac
-# }
 
 log_color_filter() {
     if [ -z "$GLOPT_COLORS" ] || ! [ -t 1 ]; then
@@ -820,28 +942,6 @@ log_color_filter() {
                 fi
             fi
         done
-
-        # while read date time direction op item_or_group_kw item_or_group tofromkw hostkw host rest; do
-        #     echo -n "$date $time $direction $op $item_or_group_kw "
-        #     if [ $item_or_group_kw = group ]; then
-        #         tty_color magenta
-        #     else
-        #         tty_color cyan
-        #     fi
-        #     echo -n "$item_or_group "
-        #     tty_color reset
-        #     if [ "${rest%OK}" != "$rest" ]; then
-        #         echo -n "$tofromkw $hostkw $host ${rest%OK}"
-        #         tty_color green
-        #         echo OK
-        #         tty_color reset
-        #     else
-        #         echo -n "$tofromkw $hostkw $host "
-        #         tty_color red
-        #         echo "$rest"
-        #         tty_color reset
-        #     fi
-        # done
     fi
 }
 
@@ -878,13 +978,6 @@ do_command_log() {
                     return 1
                     ;;
             esac
-            # for item in `sort -u -k6,6 "$tmpfile"|awk '{print $6}'`; do
-            #     if have_item "$item"; then
-            #         grep -F "item $item " "$tmpfile" | tail -n1 >> "$lastops_tmpfile"
-            #     elif is_group "$item"; then
-            #         grep -F "group $item" "$tmpfile" | tail -n1 >> "$lastops_tmpfile"
-            #     fi
-            # done
             for item in `list_items`; do
                 fgrep " item $item" "$tmpfile"|tail -n1 >> "$lastops_tmpfile"
             done
@@ -893,14 +986,6 @@ do_command_log() {
         else
             print "Last operation per configured item or group in local log"
             print
-            # for item in `sort -u -k6,6 "$HOME/$LOG_FILE"|awk '{print $6}'`; do
-            #     if have_item "$item"; then
-            #         grep -F "item $item " "$HOME/$LOG_FILE" | tail -n1 >> "$lastops_tmpfile"
-            #     elif is_group "$item"; then
-            #         grep -F "group $item " "$HOME/$LOG_FILE" | tail -n1 >> "$lastops_tmpfile"
-            #     fi
-            # done
-
             for item in `list_items`; do
                 fgrep " item $item" "$HOME/$LOG_FILE"|tail -n1 >> "$lastops_tmpfile"
             done
@@ -1183,7 +1268,7 @@ set_global_flag_true  ask_before_kill
 
 # Word tokenizer for config file. Tokens are separated by newlines, and
 # syntactically significant newlines are represented by token '<<<EoS>>>'
-# (EndofStanza). Supports quoted words and quote-escaping and comment removal.
+# (EndofStanza). Supports quoted words, quote-escaping and comment removal.
 readonly EOS='<<<EoS>>>'
 token_stream() {
     awk '
@@ -1276,7 +1361,7 @@ parse_configuration() {
                 if ! echo $firstval|grep -Eq '^[a-zA-Z0-9_]+$'; then
                     print_err "Config: Illegal or empty item name: $firstval"
                     return 1
-                elif echo $firstval|grep -iEq '^(to|from|default|example|items|item)$'; then
+                elif echo $firstval|grep -iEq '^(to|from|default|with|example|items|item)$'; then
                     print_err "Config: Illegal item name: $firstval (reserved)"
                     return 1
                 fi
@@ -1391,7 +1476,7 @@ parse_configuration() {
                 elif ! echo $firstval|grep -Eq '^[a-zA-Z0-9_]+$'; then
                     print_err "Config: Illegal or empty group name: $firstval"
                     return 1
-                elif echo $firstval|grep -iEq '^(to|from|example|items|item)$'; then
+                elif echo $firstval|grep -iEq '^(to|from|example|items|item|with)$'; then
                     print_err "Config: Illegal group name: $firstval (reserved)"
                     return 1
                 fi
@@ -2067,6 +2152,19 @@ usage() {
         print "      If a remote host is specified, then the log on that host is operated upon."
     fi
     print
+    print_cyan -n "stat  "
+    print "ITEM1 ITEM2 GROUP3 [with [USER@]HOST]"
+    print "      Show a simple synchronization status for each item against remote host."
+    if [ "$1" ]; then
+        print "      If HOST is omitted, then the default sync partner host will be used."
+        print "      Only status of regular files and/or directories can be checked. Other types,"
+        print "      such dconf/gconf, will be ignored. The status check does the following:"
+        print "      For each item:"
+        print "        1. Check if rsync would add/update/delete any remote files on push."
+        print "        2. Check if rsync would add/update/delete any local files on fetch."
+        print "        3. Report status."
+    fi
+    print
     print_cyan -n "conf  "; print "[example] [items] [ITEM or GROUP]"
     print "      Parses and prints current configuration."
     if [ "$1" ]; then
@@ -2147,7 +2245,7 @@ cd "$HOME"
 COMMAND=$1
 shift
 case "$COMMAND" in
-    push|fetch)
+    push|fetch|stat)
         parse_configuration "$HOME/$CONFIG_FILE"
         retcode=$?
         if [ $retcode -ne 0 ]; then
@@ -2169,7 +2267,7 @@ case "$COMMAND" in
         if [ "$1" ]; then
             while [ "$1" ]; do
                 case $1 in
-                    to|from|TO|FROM|To|From)
+                    to|from)
                         if { [ "$1" = "to" ] || [ "$1" = "TO" ] || [ "$1" = "To" ]; } && [ "$COMMAND" = fetch ]; then
                             print_err "Cannot \"fetch to\" a host, did you mean \"fetch from ..\" ?"
                             usage
@@ -2180,13 +2278,24 @@ case "$COMMAND" in
                             usage
                         fi
                         if [ -z "$2" ]; then
-                            print_err "No '[USER@]HOST' specified after 'from' or 'to'."
+                            print_err "No [USER@]HOST specified after 'from' or 'to'."
                             usage
                         fi
                         HOST="$2"
                         shift
                         ;;
-
+                    with)
+                        if [ $COMMAND != stat ]; then
+                            print_err "Keyword 'with' can only be used with stat command."
+                            usage
+                        fi
+                        if [ -z "$2" ]; then
+                            print_err "No [USER@]HOST specified after 'with'."
+                            usage
+                        fi
+                        HOST="$2"
+                        shift
+                        ;;
                     *)
                         SELECTED_ITEMS="$SELECTED_ITEMS $1"
                         ;;
@@ -2197,7 +2306,7 @@ case "$COMMAND" in
 
         if [ -z "$HOST" ]; then
             if [ -z "$CONF_GLOBAL_DEFAULT_HOST" ]; then
-                print_err "No [USER@]host specified and no default host configured."
+                print_err "No [USER@]HOST specified and no default host configured."
                 usage
             else
                 HOST=$CONF_GLOBAL_DEFAULT_HOST
@@ -2245,8 +2354,12 @@ case "$COMMAND" in
             print_err "No matching items or groups found in configuration."
             exit 2
         fi
-
-        print "Remote host: $HOST"
+        
+        if [ $COMMAND = stat ]; then
+            print "Status with remote host: $HOST"
+        else
+            print "Remote host: $HOST"
+        fi
         print
         print "Selected items and groups: "
         for selection in $selections; do
@@ -2263,7 +2376,7 @@ case "$COMMAND" in
             fi
         done
 
-        if [ "$GLOPT_DRYRUN" ]; then
+        if [ "$GLOPT_DRYRUN" ] && [ $COMMAND != stat ]; then
             print
             print "Dry run only"
         fi
@@ -2274,20 +2387,27 @@ case "$COMMAND" in
         for selection in $selections; do
             if is_group $selection; then
                 CURRENT_GROUP=$selection
-                #log_hook_group
                 for item in `list_group_items $selection`; do
                     CURRENT_ITEM=$item
                     print 
-                    print -n "Current item: "; print_cyan $CURRENT_ITEM
-                    do_command_sync
+                    print -n "Item ";print_cyan $CURRENT_ITEM
+                    if [ $COMMAND = stat ]; then
+                        do_command_stat
+                    else
+                        do_command_sync
+                    fi
                     print
                 done
             else
                 CURRENT_GROUP=
                 CURRENT_ITEM=$selection
                 print
-                print -n "Current item: "; print_cyan $CURRENT_ITEM
-                do_command_sync
+                print -n "Item ";print_cyan $CURRENT_ITEM
+                if [ $COMMAND = stat ]; then
+                    do_command_stat
+                else
+                    do_command_sync
+                fi
                 print
             fi
         done
@@ -2315,7 +2435,7 @@ case "$COMMAND" in
             do_command_conf
         fi
         ;;
-
+        
     log)
         parse_configuration "$HOME/$CONFIG_FILE"
         if [ $? -ne 0 ]; then
