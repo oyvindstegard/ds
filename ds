@@ -25,6 +25,7 @@
 # - rsync for file/directory sync (tested with version 3.0.3)
 # - ssh, preferably set up with public key authentication and ssh-agent to remote hosts
 #   to avoid having to type password many times per run.
+# - perl for stat command
 #
 # - gconftool-2 for sync of GConf-trees (optional, works only on Linux-based systems).
 # - dconf for sync of dconf trees       (optional, works only on Linux-based systems).
@@ -124,22 +125,94 @@ path_escape_compatible() {
     echo "$1"|sed -e 's/\([ 	()"$#&]\)/\\\1/g' -e 's/\[/\\[/g' -e 's/\]/\\]/g'
 }
 
+max_mtime() {
+    type perl 1>/dev/null 2>&1 || {
+        print_err "Missing required dependency for stat command: perl"
+        print_err "It has to be available somewhere in your PATH both locally and on remote host."
+        return 255
+    }
+    
+    local path paths remote=
+    [ "$1" = remote ] && remote=1; shift
+    while [ "$1" ]; do
+        if [ "$remote" ]; then
+            path=`path_escape_compatible "$1"`
+        else
+            path="$1"
+        fi
+        paths="$paths
+$path"
+        shift
+    done
+    
+    # Use perl for a portable way to iterate paths recursively and determine
+    # the most recently modified file or directory.
+    local progtmp
+    progtmp=`mktemp -t ds_max_mtime.pl.XXXXX`
+    cat > $progtmp <<"EOP"
+#!/usr/bin/env perl
+use strict;
+my $mtime_newest = 0;
+my $path_newest = "";
+sub traverse {
+    my $path = $_[0];
+    my @stats = stat($path);
+    if (@stats) {
+        my $mtime = $stats[9];
+        if ($mtime > $mtime_newest) {
+            $mtime_newest = $mtime;
+            $path_newest = $path;
+        }
+    }
+    if (-d "$path" && !(-l "$path")) {
+        my $DH;
+        opendir($DH, $path) or return;
+        while (defined (my $entry = readdir($DH))) {
+            next if ($entry eq "." || $entry eq "..");
+            &traverse($path . "/" . $entry);
+        }
+        closedir($DH);
+    }
+}
+foreach my $path (@ARGV) {
+    &traverse($path);
+}
+if ($mtime_newest) {
+    print "$mtime_newest\t$path_newest\n";
+} else {
+    exit 1;
+}
+EOP
+    local IFS exitcode
+    newline_IFS
+    if [ "$remote" ]; then
+        ssh $HOST perl - $paths < $progtmp
+        exitcode=$?
+    else
+        perl $progtmp $paths
+        exitcode=$?
+    fi
+    reset_IFS
+    rm -f $progtmp
+    return $exitcode
+}
+
+
 # Handle files and directories
 # If OP is 'stat', then the following applies:
-#   Retcode 0: no changes locally or remotely
-#   Retcode 1: local file changes only
-#   Retcode 2: remote file changes only
-#   Retcode 3: both local or remote file changes
-#   Retcode 4: unknown
-#   Variable CHANGES_PUSH will contain list of
-#   changes which would be sent to remote host on push.
-#   Variable CHANGES_FETCH will contain list of
-#   changes which would be done locally on fetch.
+#   . Variable MAX_MTIME_REMOTE will be set to higest
+#     modification timestamp found amongst remote files/dirs.
+#   . Variable MAX_MTIME_REMOTE_PATH will be set to remote
+#     path with highest mtime.
+#   . Variable MAX_MTIME_LOCAL will be set to highest
+#     modification timestamp found amongst local files/dirs.
+#   . Variable MAX_MTIME_LOCAL_PATH will be set to local
+#     path with highest mtime.
 #
 # If OP is 'push' or 'fetch', then variable ERRORS will contain any error
 # messages if rsync fails.
 #
-# Retcode 10 if rsync fails for any OP.
+# Retcode 10 if anything fails for any OP.
 # Retcode 100 for invalid OP.
 #
 handler_file() {
@@ -210,104 +283,117 @@ $1"
         esac
         shift
     done
-
     
-    local retcode
-    # NOTE: --protect-args is only compatible with newer rsync versions, stay compatible and work-around by escaping instead.
     case $OP in
         stat)
-            local local_file_changes= remote_file_changes= output
-            opts="--archive
---existing
---update
---itemize-changes
---dry-run"
+            local local_max_mtime= remote_max_mtime= output retcode
+            local IFS
+            newline_IFS
+
+            CHANGES_PUSH=
             if [ "$relative_paths" ]; then
-                newline_IFS
-                # Check if any local file which also exists remotely is newer
-                output=`rsync -auOi --existing --relative --no-implied-dirs $relative_paths "$HOST:"`
-                retcode=$?
-                if [ $retcode -ne 0 ]; then
-                    print_err "handler_file: rsync failed with error $retcode (path list: $relpaths_disp)"
+                output=`rsync -aui -n --no-implied-dirs --relative $relative_paths $HOST:`
+                if [ $? -ne 0 ]; then
+                    print_err "rsync failed for paths: $relpaths_disp"
                     return 10
                 fi
-                if [ "$output" ]; then
-                    local_file_changes=1
-                    CHANGES_PUSH="$CHANGES_PUSH
-$output"
-                fi
-
-                # Check if remote is newer
-                local remote_relative_paths path escaped_path
-                for path in $relative_paths; do
-                    escaped_path=`path_escape_compatible "$path"`
-                    remote_relative_paths="$remote_relative_paths
-$HOST:$escaped_path"
-                done
-                
-                output=`rsync -auOi --existing --relative --no-implied-dirs $remote_relative_paths .`
-                if [ $retcode -ne 0 ]; then
-                    print_err "handler_file: rsync failed with error $retcode (path list: $relpaths_disp)"
-                    return 10
-                fi
-                if [ "$output" ]; then
-                    remote_file_changes=1
-                    CHANGES_FETCH="$CHANGES_FETCH
-$output"
-                fi
-                reset_IFS
+                [ "$output" ] && CHANGES_PUSH="$output"
             fi
-
             if [ "$absolute_paths" ]; then
                 local abspath abspath_escaped
-                newline_IFS
-                for abspath in "$absolute_paths"; do
+                for abspath in $absolute_paths; do
                     abspath_escaped=`path_escape_compatible "$abspath"`
-                    
-                    # Check if local is newer
-                    output=`rsync $opts $abspath "$HOST:$abspath_escaped"`
-                    if [ $retcode -ne 0 ]; then
-                        print_err "handler_file: rsync failed with error $retcode (path: $abspath)"
-                        return 10
-                    fi
-                    if [ "$output" ]; then
-                        have_local_changes=1
-                        CHANGES_PUSH="$CHANGES_PUSH
-$output"
-                    fi
-
-                    
-                    # Check if remote is newer
-                    output=`rsync $opts "$HOST:$abspath_escaped" "$abspath"`
-                    if [ $retcode -ne 0 ]; then
-                        print_err "handler_file: rsync failed with error $retcode (path: $abspath)"
+                    output=`rsync -aui -n $abspath $HOST:$abspath_escaped`
+                    if [ $? -ne 0 ]; then
+                        print_err "rsync failed for path: $abspath"
                         return 10
                     fi
                     
                     if [ "$output" ]; then
-                        have_remote_changes=1
-                        CHANGES_FETCH="$CHANGES_FETCH
+                        if [ "$FILE_CHANGES_PUSH" ]; then
+                            CHANGES_PUSH="$CHANGES_PUSH
 $output"
+                        else
+                            CHANGES_PUSH="$output"
+                        fi
                     fi
                 done
-                reset_IFS
             fi
 
-            if [ "$have_local_changes" ] && [ "$have_remote_changes" ]; then
-                return 3
-            elif [ "$have_local_changes" ] && [ -z "$have_remote_changes" ]; then
-                return 1
-            elif [ -z "$have_local_changes" ] && [ "$have_remote_changes" ]; then
-                return 2
-            else
-                return 0
+            CHANGES_FETCH=
+            if [ "$relative_paths" ]; then
+                local relpath relpath_escaped relpaths_host=
+                for relpath in $relative_paths; do
+                    relpath_escaped=`path_escape_compatible "$relpath"`
+                    relpaths_host="$relpaths_host
+$HOST:$relpath_escaped"
+                done
+                output=`rsync -aui -n --no-implied-dirs --relative $relpaths_host .`
+                if [ $? -ne 0 ]; then
+                    print_err "rsync failed for paths: $relpaths_disp"
+                    return 10
+                fi
+                if [ "$output" ]; then
+                    CHANGES_FETCH="$output"
+                fi
             fi
+            if [ "$absolute_paths" ]; then
+                local abspath abspath_escaped
+                for abspath in $absolute_paths; do
+                    abspath_escaped=`path_escape_compatible "$abspath"`
+                    output=`rsync -auOi -n $HOST:$abspath_escaped $abspath`
+                    if [ $? -ne 0 ]; then
+                        print_err "rsync failed for path: $abspath"
+                        return 10
+                    fi
+                    if [ "$output" ]; then
+                        if [ "$CHANGES_FETCH" ]; then
+                            CHANGES_FETCH="$CHANGES_FETCH
+$output"
+                        else
+                            CHANGES_FETCH="$output"
+                        fi
+                    fi
+                done
+            fi
+                    
+            if [ "$CHANGES_FETCH" ] && [ "$CHANGES_PUSH" ]; then
+                local paths
+                if [ "$relative_paths" ]; then
+                    paths="$relative_paths"
+                fi
+                if [ "$absolute_paths" ]; then
+                    paths="$paths
+$absolute_paths"
+                fi
+                output=`max_mtime local $paths`
+                if [ $? -ne 0 ] || [ -z "$output" ]; then
+                    print_err "handler_file: failed to determine max local mtime for paths: $paths"
+                    return 10
+                fi
+                MAX_MTIME_LOCAL=`echo "$output"|cut -f1`
+                MAX_MTIME_LOCAL_PATH=`echo "$output"|cut -f2-`
+                
+                output=`max_mtime remote $paths`
+                if [ $? -ne 0 ] || [ -z "$output" ]; then
+                    print_err "handler_file: failed to determine max remote mtime for paths: $paths"
+                    return 10
+                fi
+                MAX_MTIME_REMOTE=`echo "$output"|cut -f1`
+                MAX_MTIME_REMOTE_PATH=`echo "$output"|cut -f2-`
+            fi                
+            
+            
+            return 0
             ;;
 
         
         push)
+           # NOTE: --protect-args is only compatible with newer rsync versions, stay compatible and work-around by escaping instead.
+            local retcode
             if [ "$relative_paths" ]; then
                 print "Pushing to remote host $HOST:" $relpaths_disp
+                local IFS
                 newline_IFS
                 #rsync --protect-args --relative --no-implied-dirs --archive $opts $relative_paths "$HOST:." # dot(.) after HOST: is work-around for rsync-bug.
                 rsync  --relative --no-implied-dirs --archive $opts $relative_paths "$HOST:"
@@ -338,6 +424,7 @@ $output"
             ;;
 
         fetch)
+            local retcode
             if [ "$relative_paths" ]; then
                 print "Fetching from remote host $HOST:" $relpaths_disp
                 newline_IFS
@@ -659,37 +746,26 @@ do_command_stat() {
 
     # Do sync status for files/dirs
     if property_values_exist ITEM $CURRENT_ITEM FILES; then
+        local IFS
         newline_IFS
         handler_file `list_property_values ITEM $CURRENT_ITEM FILES`
         retcode=$?
-        case $retcode in
-            0)
-                print_green "   In sync"
-                ;;
-            1)
-                print -n "<  ";print "Updated locally"
-                if [ "$GLOPT_VERB" ]; then
-                    print "$CHANGES_PUSH"
-                fi
-                ;;
-            2)
-                print -n " > ";print_yellow "Updated remotely"
-                if [ "$GLOPT_VERB" ]; then
-                    print "$CHANGES_FETCH"
-                fi
-                ;;
-            3)
-                print -n "<> ";print_red "Updated both locally and remotely."
-                if [ "$GLOPT_VERB" ]; then
-                    print "$CHANGES_PUSH"
-                    print "$CHANGES_FETCH"
-                fi
-                ;;
-            *)
-                print_warn "File handler reported errors while checking status"
-                ;;
-        esac
-        reset_IFS
+        if [ $retcode -ne 0 ]; then
+            print_red "  Unknown error"
+            return 1
+        fi
+        echo debug: MAX_MTIME_LOCAL=$MAX_MTIME_LOCAL
+        echo debug: MAX_MTIME_LOCAL_PATH=$MAX_MTIME_LOCAL_PATH
+        echo debug: MAX_MTIME_REMOTE=$MAX_MTIME_REMOTE
+        echo debug: MAX_MTIME_REMOTE_PATH=$MAX_MTIME_REMOTE_PATH
+        
+        if [ $MAX_MTIME_LOCAL -gt $MAX_MTIME_REMOTE ]; then
+            print -n "<  "; print_green "Most recently updated locally."
+        elif [ $MAX_MTIME_LOCAL -eq $MAX_MTIME_REMOTE ]; then
+            print_green "   Looks untouched on both sides."
+        else
+            print -n ">  ";print_yellow "Most recently updated remotely."
+        fi
     fi
 }
 
@@ -713,6 +789,7 @@ do_command_sync() {
     # Do preconditions first
     if property_values_exist ITEM $item CONDS; then
         local cond
+        local IFS
         newline_IFS
         for cond in `list_property_values ITEM $item CONDS`; do
             reset_IFS
@@ -824,7 +901,7 @@ ask_kill_local_remote() {
     local pids= pid
     while [ "$1" ]; do
         pids=`pgrep -f -U $USER "$1"` && { for pid in $pids; do [ $pid -ne $$ ] && local_pids="$local_pids $pid"; done; }
-        pids=`ssh $HOST "pgrep -f -U $username '$1'"` && { for pid in $pids; do remote_pids="$remote_pids $pid"; done; }
+        pids=`ssh -x $HOST "pgrep -f -U $username '$1'"` && { for pid in $pids; do remote_pids="$remote_pids $pid"; done; }
         shift
     done
 
@@ -848,15 +925,15 @@ ask_kill_local_remote() {
 
     if [ "$remote_pids" ]; then
         print_warn "Processes associated with item $CURRENT_ITEM found running remotely:"
-        ssh $HOST "ps -p '$remote_pids' -o pid,cmd"
+        ssh -x $HOST "ps -p '$remote_pids' -o pid,cmd"
         print
         if [ "$NO_KILL_CONFIRMATION" ]; then
             print "Killing now"
-            ssh $HOST kill $remote_pids && sleep 3 || ask_abort "Failed to kill remote processes associated with item $CURRENT_ITEM"
+            ssh -x $HOST kill $remote_pids && sleep 3 || ask_abort "Failed to kill remote processes associated with item $CURRENT_ITEM"
         else
             if ask_ynq "Kill them before sync ?"; then
                 print "Killing now"
-                ssh $HOST kill $remote_pids && sleep 3 || ask_abort "Failed to kill remote processes associated with item $CURRENT_ITEM"
+                ssh -x $HOST kill $remote_pids && sleep 3 || ask_abort "Failed to kill remote processes associated with item $CURRENT_ITEM"
             fi
         fi
     fi
@@ -878,7 +955,7 @@ log_hook() {
 
             # Update remote log file
             echo "`log_date`  > REMOTE_PUSH ${CURRENT_GROUP:+group $CURRENT_GROUP }item $CURRENT_ITEM from host `hostname`$message" |\
-                 ssh $HOST "cat - >> $LOG_FILE"
+                 ssh -x $HOST "cat - >> $LOG_FILE"
             if [ $? -ne 0 ]; then
                 print_warn "Failed to update remote log file"
             fi
@@ -889,7 +966,7 @@ log_hook() {
 
             # Update remote log file
             echo "`log_date` <  REMOTE_FETCH ${CURRENT_GROUP:+group $CURRENT_GROUP }item $CURRENT_ITEM from host `hostname`$message" |\
-                 ssh $HOST "cat - >> $LOG_FILE"
+                 ssh -x $HOST "cat - >> $LOG_FILE"
             if [ $? -ne 0 ]; then
                 print_warn "Failed to update remote log file"
             fi
@@ -959,7 +1036,7 @@ do_command_log() {
             print
             local tmpfile
             tmpfile=`mktemp`
-            ssh $HOST "cat $LOG_FILE" > $tmpfile
+            ssh -x $HOST "cat $LOG_FILE" > $tmpfile
             case $? in # FIXME: duplicated error handling code (look further down).
                 0|1) : ;; # OK
                 2)
@@ -1000,12 +1077,12 @@ do_command_log() {
         # Clear logfile requested
         if [ "$HOST" ]; then
             print "Clearing log file ~/$LOG_FILE on remote host $HOST .."
-            ssh $HOST 'test -f $LOG_FILE'
+            ssh -x $HOST 'test -f $LOG_FILE'
             if [ $? -ne 0 ]; then
                 print_err "Log file not found on remote host $HOST."
                 return 1
             else
-                ssh $HOST "echo -n > $LOG_FILE"
+                ssh -x $HOST "echo -n > $LOG_FILE"
                 [ $? -ne 0 ] && print_err "Failed to clear log file on remote host $HOST" && return 1
                 return 0
             fi
@@ -1025,7 +1102,7 @@ do_command_log() {
     local logfile="$HOME/$LOG_FILE"
     if [ "$HOST" ]; then
         tmpfile=`mktemp`
-        ssh $HOST cat $LOG_FILE > $tmpfile
+        ssh -x $HOST cat $LOG_FILE > $tmpfile
         case $? in
             0|1) : ;; # OK
             2)
@@ -1067,9 +1144,9 @@ do_command_log() {
 # Bourne-shell lacks support for arrays.
 # These functions support management of property values in a single variable.
 # List elements/values are always separated by newlines.
-_OLDIFS=$IFS
+_ORIG_IFS="$IFS"
 reset_IFS() {
-    IFS=$_OLDIFS
+    IFS="$_ORIG_IFS"
 }
 newline_IFS() {
     IFS='
@@ -2083,13 +2160,13 @@ do_command_conf() {
     fi
     
     print_green 'Configured items:'
-    
+
+    local IFS
     newline_IFS
     for item in `list_items`; do
         conf_print_item $item
         print
     done
-    reset_IFS
 }
 
 usage() {
