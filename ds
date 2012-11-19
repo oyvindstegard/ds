@@ -36,6 +36,7 @@
 # Bugs can be reported to author:
 # Øyvind Stegard <oyvind.stegard@ifi.uio.no>
 #
+# TODO I want to be able to input options anywhere in argument list.
 # TODO better documentation
 # TODO better logging of groups
 # TODO clean up IFS-handling.
@@ -1773,7 +1774,7 @@ do_command_bashcomp() {
                         done
 
                         local provided_items
-                        if [ "$item" ]; then
+                        if [ "$item" ] && [ $j != $COMP_CWORD ]; then
                             provided_items="$provided_items $item"
                         fi
                     fi
@@ -1795,7 +1796,7 @@ do_command_bashcomp() {
                         done
 
                         local provided_items
-                        if [ "$item" ]; then
+                        if [ "$item" ] && [ $j != $COMP_CWORD ]; then
                             provided_items="$provided_items $item"
                         fi
                     fi
@@ -1844,7 +1845,7 @@ do_command_bashcomp() {
                          fi
                      done
                      local provided_items
-                     if [ "$item" ]; then
+                     if [ "$item" ] && [ $j != $COMP_CWORD ]; then
                          provided_items="$provided_items $item"
                      fi
                    ;;
