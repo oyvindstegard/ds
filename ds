@@ -116,7 +116,6 @@ ask_ynq() {
         *)           return 1 ;;
     esac
 }
-
 ask_abort() {
     ask_ynq "$*, abort ?" && print_red "Aborted." && exit 255
 }
@@ -299,20 +298,24 @@ handler_file_internal() {
             [ "$relative_paths" ] && list_append paths "$relative_paths"
             [ "$absolute_paths" ] && list_append paths "$absolute_paths"
             output=`max_mtime local $paths`
-            if [ $? -ne 0 ] || [ -z "$output" ]; then
+            retcode=$?
+            if [ $retcode -ne 0 ] || [ -z "$output" ]; then
                 print_err "handler_file: failed to determine max local mtime for paths: $paths"
                 return 10
+            else
+                MAX_MTIME_LOCAL=`echo "$output"|cut -f1`
+                MAX_MTIME_LOCAL_PATH=`echo "$output"|cut -f2-`
             fi
-            MAX_MTIME_LOCAL=`echo "$output"|cut -f1`
-            MAX_MTIME_LOCAL_PATH=`echo "$output"|cut -f2-`
 
             output=`max_mtime remote $paths`
-            if [ $? -ne 0 ] || [ -z "$output" ]; then
+            retcode=$?
+            if [ $retcode -ne 0 ] || [ -z "$output" ]; then
                 print_err "handler_file: failed to determine max remote mtime for paths: $paths"
                 return 10
+            else
+                MAX_MTIME_REMOTE=`echo "$output"|cut -f1`
+                MAX_MTIME_REMOTE_PATH=`echo "$output"|cut -f2-`
             fi
-            MAX_MTIME_REMOTE=`echo "$output"|cut -f1`
-            MAX_MTIME_REMOTE_PATH=`echo "$output"|cut -f2-`
 
             local sync_opts_push sync_opts_fetch
             sync_opts_push="-auO
@@ -729,7 +732,9 @@ do_command_stat() {
             return 1
         fi
         newline_IFS
-        if [ $MAX_MTIME_LOCAL -gt $MAX_MTIME_REMOTE ]; then
+        if [ -z "$MAX_MTIME_LOCAL" ] || [ -z "$MAX_MTIME_REMOTE" ]; then
+            print "?  Unable to determine most recent modification time."
+        elif [ $MAX_MTIME_LOCAL -gt $MAX_MTIME_REMOTE ]; then
             print -n "<  Most recent modification time found locally: "
             LC_TIME=C date -d @$MAX_MTIME_LOCAL
         elif [ $MAX_MTIME_LOCAL -eq $MAX_MTIME_REMOTE ]; then
