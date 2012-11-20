@@ -36,7 +36,7 @@
 # Bugs can be reported to author:
 # Øyvind Stegard <oyvind.stegard@ifi.uio.no>
 #
-# TODO I want to be able to input options anywhere in argument list.
+# TODO Input options anywhere in argument list.
 # TODO better documentation
 # TODO better logging of groups
 # TODO clean up IFS-handling.
@@ -213,10 +213,10 @@ EOP
 #     modification timestamp found amongst local files/dirs.
 #   - Variable MAX_MTIME_LOCAL_PATH will be set to the local
 #     path with highest mtime.
-#   - Variable CHANGES_PUSH contains list of all changes that
-#     rsync would send to remote on push.
-#   - Variable CHANGES_FETCH contains list of all changes that
-#     rsync would receive from remote on fetch.
+#   - Variable CHANGES_PUSH contains changes to existing files
+#     that would be pushed.
+#   - Variable CHANGES_FETCH contains changes to existing files
+#     that would be fetched.
 #
 # If OP is 'push' or 'fetch', then variable ERRORS will contain
 # any error messages for failed rsync invocations.
@@ -305,7 +305,7 @@ handler_file_internal() {
             fi
             MAX_MTIME_LOCAL=`echo "$output"|cut -f1`
             MAX_MTIME_LOCAL_PATH=`echo "$output"|cut -f2-`
-            
+
             output=`max_mtime remote $paths`
             if [ $? -ne 0 ] || [ -z "$output" ]; then
                 print_err "handler_file: failed to determine max remote mtime for paths: $paths"
@@ -319,15 +319,7 @@ handler_file_internal() {
 --existing"
             sync_opts_fetch="-auO
 --existing"
-            if [ $MAX_MTIME_LOCAL -gt $MAX_MTIME_REMOTE ]; then
-                sync_opts_push="-au
---delete"
-            elif [ $MAX_MTIME_LOCAL -lt $MAX_MTIME_REMOTE ]; then
-                sync_opts_fetch="-au
---delete"
-            fi
-            
-            # Check for modifications with rsync for push
+            # Check for file modifications with rsync for push
             if [ "$relative_paths" ]; then
                 output=`rsync $sync_opts_push -in --no-implied-dirs --relative $relative_paths $HOST:`
                 if [ $? -ne 0 ]; then
@@ -348,8 +340,7 @@ handler_file_internal() {
                     [ "$output" ] && list_append CHANGES_PUSH "$output"
                 done
             fi
-
-            # Check for modifications with rsync for fetch
+            # Check for file modifications with rsync for fetch
             if [ "$relative_paths" ]; then
                 local relpath relpath_escaped relpaths_host=
                 for relpath in $relative_paths; do
@@ -378,7 +369,6 @@ handler_file_internal() {
             return 0
             ;;
 
-        
         push)
             local retcode
             if [ "$relative_paths" ]; then
@@ -737,33 +727,47 @@ do_command_stat() {
         handler_file `list_property_values ITEM $CURRENT_ITEM FILES`
         retcode=$?
         if [ $retcode -ne 0 ]; then
-            print -n "X ";print_red "Unable to determine status due to error."
+            print_red -n "X  ";print "Unable to determine status due to error."
             return 1
         fi
-        local IFS
         newline_IFS
         if [ $MAX_MTIME_LOCAL -gt $MAX_MTIME_REMOTE ]; then
-            print -n "Most recent modification time found locally: "
+            print -n "<  Most recent modification time found locally: "
             LC_TIME=C date -d @$MAX_MTIME_LOCAL
         elif [ $MAX_MTIME_LOCAL -eq $MAX_MTIME_REMOTE ]; then
-            print_green "Equal most recent modification on both sides."
+            print_green -n "== ";print "Equal most recent modification time on both sides."
         else
-            print_yellow -n "Most recent modification time found remotely: "
-            date -d @$MAX_MTIME_REMOTE
+            print_yellow -n " > ";print -n "Most recent modification time found remotely: "
+            LC_TIME=C date -d @$MAX_MTIME_REMOTE
         fi
 
-        if [ "$CHANGES_PUSH" ] && [ "$CHANGES_FETCH" ]; then
-            print -n "X ";print_red "Changes in both directions (might need merge)."
-        elif [ "$CHANGES_PUSH" ] && [ -z "$CHANGES_FETCH" ]; then
-            print -n "< ";print "Changes to push to $HOST"
+        if [ "$CHANGES_PUSH" ] && [ -z "$CHANGES_FETCH" ]; then
+            print -n "<  "; print "Local changes."
+            if [ "$GLOPT_VERB" ]; then
+                local change
+                for change in $CHANGES_PUSH; do
+                    print "$change"
+                done
+            fi
         elif [ -z "$CHANGES_PUSH" ] && [ "$CHANGES_FETCH" ]; then
-            print -n "> ";print_yellow "Changes to fetch from $HOST"
-        else
-            print -n "= ";print_green "No changes to push or fetch."
-            if [ $MAX_MTIME_LOCAL -gt $MAX_MTIME_REMOTE ]; then
-                print "  (There might be remote creations/deletions which are not taken into consideration.)"
-            elif [ $MAX_MTIME_LOCAL -lt $MAX_MTIME_REMOTE ]; then
-                print "  (There might be local creations/deletions which are not taken into consideration.)"
+            print_yellow -n " > "; print "Remote changes."
+            if [ "$GLOPT_VERB" ]; then
+                local change
+                for change in $CHANGES_FETCH; do
+                    print "$change"
+                done
+            fi
+        elif [ "$CHANGES_PUSH" ] && [ "$CHANGES_FETCH" ]; then
+            print_red -n "<> "; print "Both local and remote changes."
+            if [ "$GLOPT_VERB" ]; then
+                local change
+                for change in $CHANGES_PUSH; do
+                    print "   $change"
+                done
+                print
+                for change in $CHANGES_FETCH; do
+                    print "   $change"
+                done
             fi
         fi
     fi
@@ -1717,7 +1721,7 @@ do_command_bashcomp() {
         fi
     fi
 
-    local COMMANDS="push fetch conf log bashcomp"
+    local COMMANDS="push fetch stat conf log bashcomp"
     local OPTIONS="c Y i v z n l u V h H"
     local state=first cursorstate= j=0 word
     for word in "${COMP_WORDS[@]}"; do
@@ -2229,15 +2233,16 @@ usage() {
     print
     print_cyan -n "stat  "
     print "ITEM1 ITEM2 GROUP3 [with [USER@]HOST]"
-    print "      Show a simple synchronization status for each item against remote host."
+    print "      Show a simple synchronization status for each item with remote host."
     if [ "$1" ]; then
         print "      If HOST is omitted, then the default sync partner host will be used."
-        print "      Only status of regular files and/or directories can be checked. Other types,"
+        print "      Only status of regular files/dirs can be checked. Other types,"
         print "      such dconf/gconf, will be ignored. The status check does the following:"
         print "      For each item:"
-        print "        1. Check if rsync would add/update/delete any remote files on push."
-        print "        2. Check if rsync would add/update/delete any local files on fetch."
-        print "        3. Report status."
+        print "        1. Find most most recent mtime for remote and local files."
+        print "        2. Check if rsync would update any existing remote files on push."
+        print "        3. Check if rsync would update any existing local files on fetch."
+        print "        4. Report status."
     fi
     print
     print_cyan -n "conf  "; print "[example] [items] [ITEM or GROUP]"
