@@ -715,17 +715,15 @@ handler_gconf() {
     esac
 }
 
-# Execute stat
+# Execute command stat
 do_command_stat() {
-    local retcode
     [ -z "$CURRENT_ITEM" ] && return 1
-
     # Do sync status for files/dirs
     if property_values_exist ITEM $CURRENT_ITEM FILES; then
         local IFS
         newline_IFS
         handler_file `list_property_values ITEM $CURRENT_ITEM FILES`
-        retcode=$?
+        local retcode=$?
         if [ $retcode -ne 0 ]; then
             print_red -n "X  ";print "Unable to determine status due to error."
             return 1
@@ -742,33 +740,27 @@ do_command_stat() {
         fi
 
         if [ "$CHANGES_PUSH" ] && [ -z "$CHANGES_FETCH" ]; then
-            print -n "<  "; print "Local changes."
-            if [ "$GLOPT_VERB" ]; then
-                local change
-                for change in $CHANGES_PUSH; do
-                    print "$change"
-                done
-            fi
+            print -n "<  "; print "Local file changes."
+            local change
+            for change in $CHANGES_PUSH; do
+                print_verbose "$change"
+            done
         elif [ -z "$CHANGES_PUSH" ] && [ "$CHANGES_FETCH" ]; then
-            print_yellow -n " > "; print "Remote changes."
-            if [ "$GLOPT_VERB" ]; then
-                local change
-                for change in $CHANGES_FETCH; do
-                    print "$change"
-                done
-            fi
+            print_yellow -n " > "; print "Remote file changes."
+            local change
+            for change in $CHANGES_FETCH; do
+                print_verbose "$change"
+            done
         elif [ "$CHANGES_PUSH" ] && [ "$CHANGES_FETCH" ]; then
-            print_red -n "<> "; print "Both local and remote changes."
-            if [ "$GLOPT_VERB" ]; then
-                local change
-                for change in $CHANGES_PUSH; do
-                    print "   $change"
-                done
-                print
-                for change in $CHANGES_FETCH; do
-                    print "   $change"
-                done
-            fi
+            print_red -n "<> "; print "Both local and remote file changes."
+            local change
+            for change in $CHANGES_PUSH; do
+                print_verbose "   $change"
+            done
+            print_verbose
+            for change in $CHANGES_FETCH; do
+                print_verbose "   $change"
+            done
         fi
     fi
 }
@@ -1763,32 +1755,16 @@ do_command_bashcomp() {
                 fi
                 ;;
 
-            push)
-                local pushargs=1
+            push|fetch|stat)
+                local cmdargs=1
                 if [ "$word" ]; then
-                    if [ "$word" = to ]; then
-                        [ -z "$host" ] && state=host || break
-                    else
-                        local item= i
-                        for i in $__DS_COMP_ITEMS; do
-                            if [ "$word" = "$i" ]; then
-                                item=$word
-                                break
-                            fi
-                        done
-
-                        local provided_items
-                        if [ "$item" ] && [ $j != $COMP_CWORD ]; then
-                            provided_items="$provided_items $item"
-                        fi
-                    fi
-                fi
-                ;;
-
-            fetch)
-                local fetchargs=1
-                if [ "$word" ]; then
-                    if [ "$word" = from ]; then
+                    local hostword
+                    case $command in
+                       fetch) hostword=from ;;
+                       push) hostword=to ;;
+                       stat) hostword=with ;;
+                    esac
+                    if [ "$word" = $hostword ]; then
                         [ -z "$host" ] && state=host || break
                     else
                         local item= i
@@ -1904,21 +1880,21 @@ do_command_bashcomp() {
             fi
             ;;
 
-        push|fetch)
-            if [ -z "$pushargs" ] && [ -z "$fetchargs" ]; then
-                if [ "${COMP_WORDS[COMP_CWORD]}" = fetch ]; then
-                    COMPREPLY=(fetch); return
-                elif [ "${COMP_WORDS[COMP_CWORD]}" = push ]; then
-                    COMPREPLY=(push); return
-                fi
+        push|fetch|stat)
+            if [ -z "$cmdargs" ]; then
+                case ${COMP_WORDS[COMP_CWORD]} in
+                    fetch) COMPREPLY=(fetch) ;;
+                    push) COMPREPLY=(push) ;;
+                    stat) COMPREPLY=(stat) ;;
+                esac
+                return
             fi
 
             local items
             items=$($__DS_CMD __compitems $provided_items)
 
             if [ -z "$host" ]; then
-                [ $cursorstate = fetch ] && tofrom=from || tofrom=to
-                COMPREPLY=($(compgen -W "$items $tofrom" -- ${COMP_WORDS[COMP_CWORD]}))
+                COMPREPLY=($(compgen -W "$items $hostword" -- ${COMP_WORDS[COMP_CWORD]}))
             else
                 COMPREPLY=($(compgen -W "$items" -- ${COMP_WORDS[COMP_CWORD]}))
             fi
@@ -1970,7 +1946,7 @@ do_command_bashcomp() {
         host)
             local reply=
             if [ -z "$hostargs" ]; then
-                if [ "${COMP_WORDS[COMP_CWORD]}" = to ] || [ "${COMP_WORDS[COMP_CWORD]}" = from ] || [ "${COMP_WORDS[COMP_CWORD]}" = remote ]; then
+                if [ "${COMP_WORDS[COMP_CWORD]}" = to ] || [ "${COMP_WORDS[COMP_CWORD]}" = from ] || [ "${COMP_WORDS[COMP_CWORD]}" = remote ] || [ "${COMP_WORDS[COMP_CWORD]}" = with ]; then
                     reply=${COMP_WORDS[COMP_CWORD]}
                 fi
             elif [ -f ~/.ssh/config ]; then
