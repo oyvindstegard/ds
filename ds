@@ -439,7 +439,6 @@ handler_file_internal() {
             return 100
             ;;
     esac
-
     [ "$ERRORS" ] && return 10 || return 0
 }
 
