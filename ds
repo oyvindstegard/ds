@@ -42,7 +42,7 @@
 # TODO clean up IFS-handling.
 
 # Global constants and default values.
-readonly VERSION=0.9.9
+readonly VERSION=1.0
 readonly LOG_FILE=".ds.log"     # always relative to $HOME
 readonly CONFIG_FILE=".ds.conf" # always relative to $HOME
 readonly DEBUG=
@@ -297,16 +297,13 @@ handler_file_internal() {
             local paths=
             [ "$relative_paths" ] && list_append paths "$relative_paths"
             [ "$absolute_paths" ] && list_append paths "$absolute_paths"
-            output=`max_mtime local $paths`
-            retcode=$?
-            if [ $retcode -ne 0 ] || [ -z "$output" ]; then
-                print_err "handler_file: failed to determine max local mtime for paths: $paths"
-                return 10
-            else
-                MAX_MTIME_LOCAL=`echo "$output"|cut -f1`
-                MAX_MTIME_LOCAL_PATH=`echo "$output"|cut -f2-`
-            fi
 
+            # Run max_mtime function in background on the local side, so it can run it parallel with
+            # remote check.
+            local local_mtime_pid local_mtime_outputfile
+            local_mtime_outputfile=`mktemp`
+            max_mtime local $paths </dev/null 1>"$local_mtime_outputfile" 2>&1 & local_mtime_pid=$!
+            
             output=`max_mtime remote $paths`
             retcode=$?
             if [ $retcode -ne 0 ] || [ -z "$output" ]; then
@@ -317,6 +314,19 @@ handler_file_internal() {
                 MAX_MTIME_REMOTE_PATH=`echo "$output"|cut -f2-`
             fi
 
+            # Wait for local max_mtime process to end
+            wait $local_mtime_pid
+            retcode=$?
+            if [ $retcode -ne 0 ] && [ $retcode -ne 127 ]; then
+                print_err "handler_file: failed to determine max local mtime for paths: $paths"
+                rm -f "$local_mtime_outputfile"
+                return 10
+            else
+                MAX_MTIME_LOCAL=`cut -f1 "$local_mtime_outputfile"`
+                MAX_MTIME_LOCAL_PATH=`cut -f2- "$local_mtime_outputfile"`
+                rm -f "$local_mtime_outputfile"
+            fi
+            
             local sync_opts_push sync_opts_fetch
             sync_opts_push="-auO
 --existing"
