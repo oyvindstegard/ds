@@ -36,13 +36,12 @@
 # Bugs can be reported to author:
 # Øyvind Stegard <oyvind.stegard@ifi.uio.no>
 #
-# TODO Input options anywhere in argument list.
 # TODO better documentation
 # TODO better logging of groups
 # TODO clean up IFS-handling.
 
 # Global constants and default values.
-readonly VERSION=1.0
+readonly VERSION=1.0.1
 readonly LOG_FILE=".ds.log"     # always relative to $HOME
 readonly CONFIG_FILE=".ds.conf" # always relative to $HOME
 readonly DEBUG=
@@ -1446,7 +1445,7 @@ parse_configuration() {
                 if ! echo $firstval|grep -Eq '^[a-zA-Z0-9_]+$'; then
                     print_err "Config: Illegal or empty item name: $firstval"
                     return 1
-                elif echo $firstval|grep -iEq '^(to|from|default|with|example|items|item)$'; then
+                elif echo $firstval|grep -iEq '^(to|from|default|with|example|items|item|edit)$'; then
                     print_err "Config: Illegal item name: $firstval (reserved)"
                     return 1
                 fi
@@ -1561,7 +1560,7 @@ parse_configuration() {
                 elif ! echo $firstval|grep -Eq '^[a-zA-Z0-9_]+$'; then
                     print_err "Config: Illegal or empty group name: $firstval"
                     return 1
-                elif echo $firstval|grep -iEq '^(to|from|example|items|item|with)$'; then
+                elif echo $firstval|grep -iEq '^(to|from|example|items|item|edit|with)$'; then
                     print_err "Config: Illegal group name: $firstval (reserved)"
                     return 1
                 fi
@@ -1826,8 +1825,9 @@ do_command_bashcomp() {
 
             conf)
                 local confargs=1
-                local confarg_example confarg_items
+                local confarg_example confarg_items confarg_edit
                 case $word in
+                  edit) confarg_edit=1 ;;
                   example) confarg_example=1 ;;
                   items) confarg_items=1 ;;
                   *) 
@@ -1925,8 +1925,10 @@ do_command_bashcomp() {
                     if [ "${COMP_WORDS[COMP_CWORD]}" = items ]; then reply=items; else reply=; fi
                 elif [ "$confarg_example" ]; then
                     if [ "${COMP_WORDS[COMP_CWORD]}" = example ]; then reply=example; else reply=; fi
+                elif [ "$confarg_edit" ]; then
+                    if [ "${COMP_WORDS[COMP_CWORD]}" = edit ]; then reply=edit; else reply=; fi
                 else
-                    reply="example items $($__DS_CMD __compitems $provided_items)"
+                    reply="example edit items $($__DS_CMD __compitems $provided_items)"
                 fi
             fi
 
@@ -2037,6 +2039,48 @@ do_command_conf_items() {
     else
         print 'No items are configured.'
     fi
+}
+
+do_command_conf_edit() {
+    local tmpfile
+    tmpfile=`mktemp -t ds.conf.XXXXXX` || {
+        print_err "Failed to create temporary file."
+        return 1
+    }
+    cp "$HOME/$CONFIG_FILE" "$tmpfile"
+    ${EDITOR:-vi} "$tmpfile" || {
+        print_err "Editor failed."
+        rm -f "$tmpfile"
+        return 1
+    }
+    # Validate config file
+    local save=1 ans
+    while ! parse_configuration "$tmpfile"; do
+        save=
+        read -p "New config did not parse correctly. [E]dit, [s]ave anyway or [d]iscard ? [E/s/d] " ans
+        case $ans in
+            s) save=1; break ;;
+            d) break ;;
+            [eE]*|"")
+                ${EDITOR:-vi} "$tmpfile" || {
+                    print_err "Editor failed."
+                    rm -f "$tmpfile"
+                    return 1
+                }
+                save=1
+                ;;
+        esac
+    done
+    if [ "$save" ]; then
+        if ! diff "$HOME/$CONFIG_FILE" "$tmpfile" 1>/dev/null 2>&1; then
+            cp "$tmpfile" "$HOME/$CONFIG_FILE"
+        else
+            print "No changes."
+        fi
+    else
+        print_warn "Edits discarded."
+    fi
+    rm -f "$tmpfile"
 }
 
 conf_print_item() {
@@ -2235,13 +2279,14 @@ usage() {
         print "        4. Report status."
     fi
     print
-    print_cyan -n "conf  "; print "[example] [items] [ITEM or GROUP]"
+    print_cyan -n "conf  "; print "[example] [items] [edit] [ITEM or GROUP ..]"
     print "      Parses and prints current configuration."
     if [ "$1" ]; then
         print "      If 'example' is specified, then an example configuration file"
         print "      is printed to standard out. If 'items' is specified, then only"
         print "      item names and groups are listed. Otherwise, arguments are assumed"
         print "      to be item or group names for which config should be printed."
+        print "      If 'edit' is specified, then open EDITOR on config file."
     fi
     print
     print_cyan "bashcomp"
@@ -2308,7 +2353,10 @@ LOG_ALL=
 LOG_LASTOP=
 
 # Set basedir to HOME
-cd "$HOME"
+[ -d "$HOME" ] && cd "$HOME" || {
+    print_err "Could not chdir to HOME dir $HOME"
+    exit 1
+}
 
 # Parse and validate command
 [ -z "$1" ] && usage
@@ -2484,7 +2532,7 @@ case "$COMMAND" in
         ;;
 
     conf*)
-        if [ "$1" != example ]; then
+        if [ "$1" != example ] && [ "$1" != edit ]; then
             parse_configuration "$HOME/$CONFIG_FILE"
             if [ $? -ne 0 ]; then
                 print_err "Failed to parse configuration."
@@ -2497,6 +2545,8 @@ case "$COMMAND" in
                 do_command_conf_example
             elif [ "$1" = items ]; then
                 do_command_conf_items
+            elif [ "$1" = edit ]; then
+                do_command_conf_edit
             else
                # Assume args are item or group names to be displayed
                 do_command_conf_items "$@"
