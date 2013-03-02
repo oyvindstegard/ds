@@ -41,7 +41,7 @@
 # TODO clean up IFS-handling.
 
 # Global constants and default values.
-readonly VERSION=1.0.2
+readonly VERSION=1.1.0
 readonly LOG_FILE=".ds.log"     # always relative to $HOME
 readonly CONFIG_FILE=".ds.conf" # always relative to $HOME
 readonly DEBUG=
@@ -221,11 +221,9 @@ EOP
 #
 # Retcode 10 if anything fails.
 # Retcode 100 for invalid OP.
-#
-# TODO consider rsync --protect-args instead of escaping paths manually.
+# Retcode 255 for pre-requisite or fatal errors
 #
 handler_file() {
-    # Check that we have rsync
     type rsync 1>/dev/null 2>&1 || {
         print_err "Missing required dependency: rsync"
         print_err "It has to be available somewhere in your PATH."
@@ -235,62 +233,62 @@ handler_file() {
     local retval oldpwd
     oldpwd=`pwd`
     cd "$HOME"                # Jump to home-directory as default base-path
+    if [ $? -ne 0 ]; then
+        print_err "Could not chdir to home directory $HOME"
+        return 255
+    fi
     handler_file_internal "$@"
     retval=$?
     cd "$oldpwd"              # Jump back
     return $retval
 }
 handler_file_internal() {
-    local opts relative_paths= absolute_paths= relpaths_disp=
-    opts=$RSYNC_EXTRA_OPTS
+    local extraopts
+    extraopts=$RSYNC_EXTRA_OPTS
     unset ERRORS
 
     # RSync command line opts is newline-separated. We bend over backwards to
     # properly support file names with spaces in them, while also batching
-    # together all relative paths in a single rsync run to make things the most
-    # efficient. (Absolute paths still need to be synced one at a time.)
+    # together multiple paths into the same rsync invocations to make things the
+    # most efficient.
 
-    [ "$opts" ] && [ "$OP" != stat ] && print "Extra rsync options: $opts"
+    [ "$extraopts" ] && [ "$OP" != stat ] && print "Extra rsync options:" $extraopts
 
-    [ "$GLOPT_DRYRUN" ] && list_append opts -n
-    [ "$GLOPT_VERB" ] && list_append opts -v
-    [ "$GLOPT_COMP" ] && list_append opts -z
-    [ "$TARGET_DELETES" ] && list_append opts --delete
-    [ "$FORCE_UPDATE" ] || list_append opts --update
+    [ "$GLOPT_DRYRUN" ] && list_append extraopts -n
+    [ "$GLOPT_VERB" ] && list_append extraopts -v
+    [ "$GLOPT_COMP" ] && list_append extraopts -z
+    [ "$TARGET_DELETES" ] && list_append extraopts --delete
+    [ "$FORCE_UPDATE" ] || list_append extraopts --update
 
+    # Standard for all rsync invocations is to send full paths to/from remote
+    # part and sync to either / or $HOME, depending on if the path is absolute
+    # or relative in config.
+    local stdopts=
+    list_append stdopts --archive
+    list_append stdopts --relative
+    list_append stdopts --no-implied-dirs
+    list_append stdopts --protect-args
+    
+    local relative_paths= relative_paths_host= absolute_paths= absolute_paths_host=
     while [ "$1" ]; do
-        case $OP in
-            push|stat)
-                if [ "${1#/}" = "$1" ]; then
-                    list_append relative_paths "$1"
-                    relpaths_disp="${relpaths_disp:+$relpaths_disp, }$1"
-                else
-                    list_append absolute_paths "$1"
-                fi
-                ;;
-
-            fetch)
-                local escaped_path
-                 if [ "${1#/}" = "$1" ]; then
-                    escaped_path=`path_escape_compatible "$1"`
-                    list_append relative_paths "$HOST:$escaped_path"
-                    relpaths_disp="${relpaths_disp:+$relpaths_disp, }$1"
-                else
-                    list_append absolute_paths "$1"
-                fi
-                ;;
-        esac
+        if [ "${1#/}" = "$1" ]; then
+            list_append relative_paths "$1"
+            list_append relative_paths_host "$HOST:$1"
+        else
+            list_append absolute_paths "$1"
+            list_append absolute_paths_host "$HOST:$1"
+        fi
         shift
     done
     
+    local IFS
+    newline_IFS
     case $OP in
         stat)
             local output retcode
             unset CHANGES_FETCH CHANGES_PUSH
             unset MAX_MTIME_LOCAL MAX_MTIME_LOCAL_PATH
             unset MAX_MTIME_REMOTE MAX_MTIME_REMOTE_PATH
-            local IFS
-            newline_IFS
 
             # Find max mtime for local and remote
             local paths=
@@ -326,57 +324,39 @@ handler_file_internal() {
                 rm -f "$local_mtime_outputfile"
             fi
             
-            local sync_opts_push sync_opts_fetch
-            sync_opts_push="-auO
---existing"
-            sync_opts_fetch="-auO
---existing"
             # Check for file modifications with rsync for push
             if [ "$relative_paths" ]; then
-                output=`rsync $sync_opts_push -in --no-implied-dirs --relative $relative_paths $HOST:`
+                output=`rsync -uO --existing -in $stdopts $relative_paths $HOST:`
                 if [ $? -ne 0 ]; then
-                    print_err "rsync failed for paths: $relpaths_disp"
+                    print_err "rsync failed for paths: " $relative_paths
                     return 10
                 fi
                 [ "$output" ] && list_append CHANGES_PUSH "$output"
             fi
             if [ "$absolute_paths" ]; then
-                local abspath abspath_escaped
-                for abspath in $absolute_paths; do
-                    abspath_escaped=`path_escape_compatible "$abspath"`
-                    output=`rsync $sync_opts_push -in $abspath $HOST:$abspath_escaped`
-                    if [ $? -ne 0 ]; then
-                        print_err "rsync failed for path: $abspath"
-                        return 10
-                    fi
-                    [ "$output" ] && list_append CHANGES_PUSH "$output"
-                done
+                output=`rsync -uO --existing -in $stdopts $absolute_paths $HOST:/`
+                if [ $? -ne 0 ]; then
+                    print_err "rsync failed for paths:" $absolute_paths
+                    return 10
+                fi
+                [ "$output" ] && list_append CHANGES_PUSH "$output"
             fi
             # Check for file modifications with rsync for fetch
-            if [ "$relative_paths" ]; then
-                local relpath relpath_escaped relpaths_host=
-                for relpath in $relative_paths; do
-                    relpath_escaped=`path_escape_compatible "$relpath"`
-                    list_append relpaths_host "$HOST:$relpath_escaped"
-                done
-                output=`rsync $sync_opts_fetch -in --no-implied-dirs --relative $relpaths_host .`
+            if [ "$relative_paths_host" ]; then
+                output=`rsync -uO --existing -in $stdopts $relative_paths_host .`
                 if [ $? -ne 0 ]; then
-                    print_err "rsync failed for paths: $relpaths_disp"
+                    print_err "rsync failed for paths:" $relative_paths
                     return 10
                 fi
                 [ "$output" ] && list_append CHANGES_FETCH "$output"
             fi
-            if [ "$absolute_paths" ]; then
-                local abspath abspath_escaped
-                for abspath in $absolute_paths; do
-                    abspath_escaped=`path_escape_compatible "$abspath"`
-                    output=`rsync $sync_opts_fetch -in $HOST:$abspath_escaped $abspath`
-                    if [ $? -ne 0 ]; then
-                        print_err "rsync failed for path: $abspath"
-                        return 10
-                    fi
-                    [ "$output" ] && list_append CHANGES_FETCH "$output"
-                done
+            if [ "$absolute_paths_host" ]; then
+                output=`rsync -uO --existing -in $stdopts $absolute_paths_host /`
+                if [ $? -ne 0 ]; then
+                    print_err "rsync failed for paths:" $absolute_paths
+                    return 10
+                fi
+                [ "$output" ] && list_append CHANGES_FETCH "$output"
             fi
             return 0
             ;;
@@ -384,63 +364,44 @@ handler_file_internal() {
         push)
             local retcode
             if [ "$relative_paths" ]; then
-                print "Pushing to remote host $HOST:" $relpaths_disp
-                local IFS
-                newline_IFS
-                rsync  --relative --no-implied-dirs --archive $opts $relative_paths "$HOST:"
+                print "Pushing to remote host $HOST:" $relative_paths
+                rsync $stdopts $extraopts $relative_paths "$HOST:"
                 retcode=$?
-                reset_IFS
                 if [ $retcode -ne 0 ]; then
-                    print_err "handler_file: rsync failed with error $retcode (path list: $relpaths_disp)"
-                    ERRORS="${ERRORS:+$ERRORS, }rsync failed with error $retcode (path list: $relpaths_disp)"
+                    print_err "handler_file: rsync failed with error $retcode (path list:" $relative_paths ")"
+                    ERRORS="${ERRORS:+$ERRORS, }rsync failed with error $retcode (path list: `echo $relative_paths`)"
                 fi
             fi
-
             if [ "$absolute_paths" ]; then
-                local abspath abspath_escape
-                newline_IFS
-                for abspath in $absolute_paths; do
-                    print "Pushing $abspath to remote host $HOST:$abspath"
-                    abspath_escaped=`path_escape_compatible "$abspath"`
-                    rsync --archive $opts $abspath "$HOST:$abspath_escaped"
-                    retcode=$?
-                    if [ $retcode -ne 0 ]; then
-                        print_err "handler_file: rsync failed with error $retcode (path: $abspath)"
-                        ERRORS="${ERRORS:+$ERRORS, }rsync failed with error $retcode (path: $abspath)"
-                    fi
-                done
-                reset_IFS
+                print "Pushing to remote host $HOST:" $absolute_paths
+                rsync $stdopts $extraopts $absolute_paths "$HOST:/"
+                retcode=$?
+                if [ $retcode -ne 0 ]; then
+                    print_err "handler_file: rsync failed with error $retcode (paths: " $absolute_paths ")"
+                    ERRORS="${ERRORS:+$ERRORS, }rsync failed with error $retcode (paths: `echo $absolute_paths`)"
+                fi
             fi
             ;;
 
         fetch)
             local retcode
-            if [ "$relative_paths" ]; then
-                print "Fetching from remote host $HOST:" $relpaths_disp
-                newline_IFS
-                rsync --relative --no-implied-dirs --archive $opts $relative_paths .
+            if [ "$relative_paths_host" ] && [ "$relative_paths" ]; then
+                print "Fetching from remote host $HOST:" $relative_paths
+                rsync $stdopts $extraopts $relative_paths_host .
                 retcode=$?
-                reset_IFS
                 if [ $retcode -ne 0 ]; then
-                    print_err "handler_file: rsync failed with error $retcode (path list: $relpaths_disp)"
-                    ERRORS="${ERRORS:+$ERRORS, }rsync failed with error $retcode (path list: $relpaths_disp)"
+                    print_err "handler_file: rsync failed with error $retcode (path list: " $relative_paths ")"
+                    ERRORS="${ERRORS:+$ERRORS, }rsync failed with error $retcode (path list: `echo $relative_paths`)"
                 fi
             fi
-
-            if [ "$absolute_paths" ]; then
-                local abspath errors abspath_escaped
-                newline_IFS
-                for abspath in $absolute_paths; do
-                    print "Fetching $abspath from remote host $HOST:$abspath"
-                    abspath_escaped=`path_escape_compatible "$abspath"`
-                    rsync --archive $opts "$HOST:$abspath_escaped" "$abspath"
-                    retcode=$?
-                    if [ $retcode -ne 0 ]; then
-                        print_err "handler_file: rsync failed with error $retcode (path $abspath)"
-                        ERRORS="${ERRORS:+$ERRORS, }rsync failed with error $retcode (path $abspath)"
-                    fi
-                done
-                reset_IFS
+            if [ "$absolute_paths_host" ] && [ "$absolute_paths" ]; then
+                print "Fetching from remote host $HOST:" $absolute_paths
+                rsync $stdopts $extraopts $absolute_paths_host /
+                retcode=$?
+                if [ $retcode -ne 0 ]; then
+                    print_err "handler_file: rsync failed with error $retcode (paths:" $absolute_paths ")"
+                    ERRORS="${ERRORS:+$ERRORS, }rsync failed with error $retcode (paths: `echo $absolute_paths`)"
+                fi
             fi
             ;;
         
@@ -971,22 +932,19 @@ ask_kill_local_remote() {
     fi
 }
 
-log_date() {
-    date +'%Y-%m-%d %H:%M'
-}
-
 log_hook() {
     { [ "$GLOPT_DRYRUN" ] || [ "$GLOPT_NOLOG" ]; } && return 0 # Log nothing if dry run or --nolog option.
-    local message
+    local message datestamp
     message=$1
+    datestamp=`date +'%Y-%m-%d %H:%M'`
 
     [ "$message" ] && message=", $message"
     case $OP in
         push)
-            echo "`log_date` <  PUSH ${CURRENT_GROUP:+group $CURRENT_GROUP }item $CURRENT_ITEM to host $HOST$message" >> "$HOME/$LOG_FILE"
+            echo "$datestamp <  PUSH ${CURRENT_GROUP:+group $CURRENT_GROUP }item $CURRENT_ITEM to host $HOST$message" >> "$HOME/$LOG_FILE"
 
             # Update remote log file
-            echo "`log_date`  > REMOTE_PUSH ${CURRENT_GROUP:+group $CURRENT_GROUP }item $CURRENT_ITEM from host `hostname`$message" |\
+            echo "$datestamp  > REMOTE_PUSH ${CURRENT_GROUP:+group $CURRENT_GROUP }item $CURRENT_ITEM from host `hostname`$message" |\
                  ssh -x $HOST "cat - >> $LOG_FILE"
             if [ $? -ne 0 ]; then
                 print_warn "Failed to update remote log file"
@@ -994,10 +952,10 @@ log_hook() {
             ;;
 
         fetch)
-            echo "`log_date`  > FETCH ${CURRENT_GROUP:+group $CURRENT_GROUP }item $CURRENT_ITEM from host $HOST$message" >> "$HOME/$LOG_FILE"
+            echo "$datestamp  > FETCH ${CURRENT_GROUP:+group $CURRENT_GROUP }item $CURRENT_ITEM from host $HOST$message" >> "$HOME/$LOG_FILE"
 
             # Update remote log file
-            echo "`log_date` <  REMOTE_FETCH ${CURRENT_GROUP:+group $CURRENT_GROUP }item $CURRENT_ITEM from host `hostname`$message" |\
+            echo "$datestamp <  REMOTE_FETCH ${CURRENT_GROUP:+group $CURRENT_GROUP }item $CURRENT_ITEM from host `hostname`$message" |\
                  ssh -x $HOST "cat - >> $LOG_FILE"
             if [ $? -ne 0 ]; then
                 print_warn "Failed to update remote log file"
