@@ -1,0 +1,6 @@
+TODO - ds
+=========
+
+* Write manual page.
+* Allow to push to multiple remote hosts in one command invocation. Useful when
+  using ds to distribute something from one host to many others.
