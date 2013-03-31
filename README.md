@@ -17,9 +17,11 @@ GNU bash. Dash also happens to be the default `/bin/sh' implementation on
 Ubuntu/Debian.
 
 The only documentation currently available is the built-in help:
+
     $ ds -H          # detailed help
 
 To get a rather elaborte configuration file example, issue:
+
     $ ds conf example
 
 
