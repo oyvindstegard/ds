@@ -17,42 +17,43 @@ GNU bash. Dash also happens to be the default `/bin/sh' implementation on
 Ubuntu/Debian.
 
 The only documentation currently available is the built-in help:
-$ ds -H          # detailed help
+    $ ds -H          # detailed help
 
 To get a rather elaborte configuration file example, issue:
-$ ds conf example
+    $ ds conf example
 
 
 Configuration and usage example
 -------------------------------
 
-$ cat ~/.ds.conf              # contents of a minimal config file
-# Default host to sync to/from
-default_host host.net
+    $ cat ~/.ds.conf              # contents of a minimal config file
+    # Default host to sync to/from
+    default_host host.net
 
-# The Foo item, with files/dirs relative to $HOME
-# Directories are always synced recursively.
-item Foo
-  files foofile1 foofile2 foofile3
-  dirs foodir1/ bardir2
-  group default
+    # The Foo item, with files/dirs relative to $HOME
+    # Directories are always synced recursively.
+    item Foo
+      files foofile1 foofile2 foofile3
+      dirs foodir1/ bardir2
+      group default
 
 
 
-$ ds push Foo to host.net     # update Foo on host.net
-# .. Do stuff with Foo resoures on host.net ..
+    $ ds push Foo to host.net     # update Foo on host.net
+    # .. Do stuff with Foo resoures on host.net ..
 
-$ ds fetch                    # fetch Foo (synced by default) from default host (host.net)
+    $ ds fetch                    # fetch Foo (synced by default) from default host (host.net)
 
-$ ds log                      # show sync log
-$ ds log remote host.net      # show sync log on remote host host.net
+    $ ds log                      # show sync log
+    $ ds log remote host.net      # show sync log on remote host host.net
 
-$ ds -H                       # show detailed help
-$ ds conf example             # show example config
+    $ ds -H                       # show detailed help
+    $ ds conf example             # show example config
 
 
 A note about default sync behaviour
 -----------------------------------
+
 The default behaviour of ds is to do proper mirroring when pushing or fetching
 data. This means that it can delete files or overwrite newer files at the
 destination of a synchronization (rsync(1) `--delete' and `-a' options). This is
