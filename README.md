@@ -8,7 +8,7 @@ a typical Linux desktop installation (optional).
 
 The script is mainly a convenient wrapper around rsync, allowing you to define
 named sets of data (typically files/directories under your $HOME directory) in a
-simple, flexible and easily readable config file format. These `sync items' can
+simple, flexible and easily readable config file format. These \`sync items' can
 then be pushed or fetched to/from remote hosts with ease. It is meant to be used
 interactively and has support for generating Bash-compatible command line
 auto-completion code. Ds itself is written in POSIX compliant plain Bourne shell
