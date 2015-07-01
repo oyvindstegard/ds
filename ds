@@ -17,7 +17,7 @@
 # this program. If not, see <http://www.gnu.org/licenses/>.
 ###############################################################################
 #
-# Script for easy synchronization of items between different computers.
+# Script for simple synchronization of configured file sets between hosts.
 #
 # Requirements:
 # - POSIX compliant (Bourne-compatible) shell (sh). GNU bash not required (code
@@ -31,14 +31,15 @@
 # Documentation: ds -H
 #                ds conf example
 #
-# Bugs can be reported to author:
-# Øyvind Stegard <oyvind.stegard@ifi.uio.no>
+# Bugs can be reported to author: Øyvind Stegard <oyvind.stegard@ifi.uio.no>
 #
 # TODO better documentation
 # TODO better logging of groups
 # TODO clean up IFS-handling.
 # TODO add "dist" command to push to multiple hosts in one go:
 #      ds dist hostA [hostB ..] [items FOO BAR ..]
+# TODO Use rsync '--ignore-missing-args' option, but only when local/remote
+#      rsync version is >= 3.1.0.
 
 # Global constants and default values.
 readonly VERSION=1.1.0
@@ -204,7 +205,6 @@ EOP
 
 ################################################################################
 # Handler for files and directories
-################################################################################
 #
 # If OP is 'stat', then the following applies:
 #   - Variable MAX_MTIME_REMOTE will be set to higest
@@ -591,7 +591,7 @@ handler_dconf() {
             
             if [ "$GLOPT_DRYRUN" ]; then
                 print "handler_dconf: dry run commands:"
-                print "handler_dconf:" "dconf dump $tree | ssh $SSH_OPTS $HOST 'DBUS_SESSION_BUS_ADDRESS=$DBUS_REMOTE_SESSION_ADDRESS dconf load $tree'"
+                print "handler_dconf:" "dconf dump $tree | ssh `echo $SSH_OPTS` $HOST 'DBUS_SESSION_BUS_ADDRESS=$DBUS_REMOTE_SESSION_ADDRESS dconf load $tree'"
             else
                 dconf dump "$tree" | ssh $SSH_OPTS $HOST "DBUS_SESSION_BUS_ADDRESS=$DBUS_REMOTE_SESSION_ADDRESS dconf load $tree"
                 if [ $? -ne 0 ]; then
@@ -618,7 +618,7 @@ handler_dconf() {
             
             if [ "$GLOPT_DRYRUN" ]; then
                 print "handler_dconf: dry run commands:"
-                print "handler_dconf:" "ssh $SSH_OPTS $HOST 'dconf dump $tree'|DBUS_SESSION_BUS_ADDRESS=$DBUS_LOCAL_SESSION_ADDRESS dconf load $tree"
+                print "handler_dconf:" "ssh `echo $SSH_OPTS` $HOST 'dconf dump $tree'|DBUS_SESSION_BUS_ADDRESS=$DBUS_LOCAL_SESSION_ADDRESS dconf load $tree"
             else
                 ssh $SSH_OPTS $HOST "dconf dump $tree" |DBUS_SESSION_BUS_ADDRESS=$DBUS_LOCAL_SESSION_ADDRESS dconf load "$tree"
                 if [ $? -ne 0 ]; then
@@ -1335,9 +1335,12 @@ parse_is_flag_arg_true() {
     return 1
 }
 
-# Nice and simple, but lenient config parser which does all the things a user expects.
+################################################################################
+# Nice and simple, but lenient config parser which does all the things a user
+# expects.
 # Allows comments (also inline), good white-space handling, quote handling
 # and checks syntax and validity.
+################################################################################
 parse_configuration() {
     local config_file
     config_file="$1"
@@ -1584,7 +1587,7 @@ item SecureFS
      cond '! grep -q securefs /proc/mounts || { echo Warning: SecureFS is mounted locally \!; false; }'
 
      # HOST variable will always be set to remote host of sync
-     # SSH_OPTS will be set to options for ssh, which includes master control socket info
+     # SSH_OPTS will be set to options for ssh, which includes master control socket info.
      # (so in this case we can also check if it is mounted remotely):
      cond '! ssh \$SSH_OPTS \$HOST grep -q securefs /proc/mounts || { echo Warning: SecureFS is mounted on remote host \$HOST \!; false; }'
 
