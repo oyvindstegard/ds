@@ -42,7 +42,7 @@
 #      rsync version is >= 3.1.0.
 
 # Global constants and default values.
-readonly VERSION=1.1.0
+readonly VERSION=1.2.0
 readonly LOG_FILE=".ds.log"     # always relative to $HOME
 readonly CONFIG_FILE=".ds.conf" # always relative to $HOME
 
