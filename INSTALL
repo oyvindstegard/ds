@@ -1,15 +1,4 @@
 INSTALL - ds
 ============
 
-There is no installation necessary. Just copy the `ds' script to somewhere in
-your PATH.
-
-Initial config
---------------
-Simple example of initial config which can be put into ~/.ds.conf:
-
-item confmisc
-     files .screenrc .inputrc .nanorc
-
-item dsconfig
-     file .ds.conf
+See section "Installation" in README.md.

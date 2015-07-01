@@ -24,6 +24,42 @@ To get a rather elaborte configuration file example, issue:
 
     $ ds conf example
 
+Changelog
+---------
+
+### Version 1.2.0, 2015-07-02 ###
+
+- Added support for ssh master connection sharing. This will reduce latency for
+  each ssh invocation that ds and rsync does, thus speeding up the entire
+  process.
+- Removed support for [deprecated] GConf tree synchronization.
+- Cleanups here and there.
+- Fix bug with `stat` command file list being duplicated, which caused [harmless]
+  slow down on stat checks.
+
+### Earlier versions ###
+
+See git history.
+
+
+Installation
+------------
+
+There is no installation necessary. Just copy the `ds' script to somewhere in
+your PATH.
+
+
+Initial config
+--------------
+
+Simple example of initial config which can be put into ~/.ds.conf:
+
+     item confmisc
+       files .screenrc .inputrc .nanorc
+
+     item dsconfig
+       file .ds.conf
+
 
 Configuration and usage example
 -------------------------------
