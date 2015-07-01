@@ -1,7 +1,7 @@
 #!/bin/sh
 # -*- coding: utf-8 -*-
 # ds
-# Copyright (C) 2009-2013 Øyvind Stegard <oyvind.stegard@ifi.uio.no>
+# Copyright (C) 2009-2015 Øyvind Stegard <oyvind.stegard@ifi.uio.no>
 ###############################################################################
 #                                LICENSE
 # This program is free software: you can redistribute it and/or modify it under
@@ -23,12 +23,11 @@
 # - Bourne-compatible shell (sh). GNU bash not required (code should be free of
 #   "bashisms"). Tested with the dash shell.
 # - rsync for file/directory sync (tested with version 3.0.3)
-# - ssh, preferably set up with public key authentication and ssh-agent to remote hosts
-#   to avoid having to type password many times per run.
-# - perl for stat command
+# - ssh, preferably set up with public key authentication and ssh-agent to remote hosts.
+# - perl for the `stat' command
 #
-# - gconftool-2 for sync of GConf-trees (optional, works only on Linux-based systems).
-# - dconf for sync of dconf trees       (optional, works only on Linux-based systems).
+# - gconftool-2 for sync of GConf-trees                 (optional, works only on Linux-based systems).
+# - dconf and dbus-daemon for sync of dconf trees       (optional, works only on Linux-based systems).
 #
 # Documentation: ds -H
 #                ds conf example
@@ -39,12 +38,13 @@
 # TODO better documentation
 # TODO better logging of groups
 # TODO clean up IFS-handling.
+# TODO add "dist" command to push to multiple hosts in one go:
+#      ds dist hostA [hostB ..] [items FOO BAR ..]
 
 # Global constants and default values.
 readonly VERSION=1.1.0
 readonly LOG_FILE=".ds.log"     # always relative to $HOME
 readonly CONFIG_FILE=".ds.conf" # always relative to $HOME
-readonly DEBUG=
 
 # Console output functions:
 # Terminal control; emit color escape sequence or reset if no args.
@@ -55,7 +55,7 @@ tty_color() {
             green)   echo -n '[0;32m'  ;;
             yellow)  echo -n '[0;33m'  ;;
             cyan)    echo -n '[01;36m' ;;
-            magenta) echo -n '[01;35m'  ;;
+            magenta) echo -n '[01;35m' ;;
             reset)   echo -n '[0m'     ;;
         esac
     else
@@ -90,17 +90,22 @@ print_err() {
 print_warn() {
     print_yellow -n "W: "
     print "$@"
-
 }
 debug() {
-    [ -z "$DEBUG" ] && return 1
+    [ "$DS_DEBUG" ] || return 1
     print_cyan -n "D: "
     print "$@"
 }
+# Escape special chars in paths
+path_escape_compatible() {
+    echo "$1"|sed -e 's/\([ 	()"$#&]\)/\\\1/g' -e 's/\[/\\[/g' -e 's/\]/\\]/g'
+}
 
+################################################################################
 # Ask Yes/No/Quit interactively. Default answer is yes, and
 # yes will be auto-answered if global GLOPT_YES-variable is set.
 # If QUIT is answered, then this function will exit.
+################################################################################
 ask_ynq() {
     if [ "$GLOPT_YES" ]; then
         print "$* [Y/n/q] y"
@@ -119,16 +124,14 @@ ask_abort() {
     ask_ynq "$*, abort ?" && print_red "Aborted." && exit 255
 }
 
-path_escape_compatible() {
-    echo "$1"|sed -e 's/\([ 	()"$#&]\)/\\\1/g' -e 's/\[/\\[/g' -e 's/\]/\\]/g'
-}
 
+################################################################################
 # Attempt to find max mtime recursively for a list of paths.
-# First arg must be either 'remote' or 'local', while the
-# rest of the args are paths.
-# Echoes timestamp as seconds since epoch, a tab character, then the
-# corresponding path.
-# This function requires perl.
+#
+# First arg must be either 'remote' or 'local', while the rest of the args are
+# paths. Echoes timestamp as seconds since epoch, a tab character, then the
+# corresponding path. This function requires perl.
+################################################################################
 max_mtime() {
     type perl 1>/dev/null 2>&1 || {
         print_err "Missing required dependency for stat command: perl"
@@ -136,7 +139,7 @@ max_mtime() {
         return 255
     }
 
-    local path paths remote=
+    local path paths= remote=
     [ "$1" = remote ] && remote=1; shift
     while [ "$1" ]; do
         if [ "$remote" ]; then
@@ -189,7 +192,7 @@ EOP
     local IFS exitcode
     newline_IFS
     if [ "$remote" ]; then
-        ssh $HOST perl - $paths < $progtmp
+        ssh $SSH_OPTS $HOST perl - $paths < $progtmp
         exitcode=$?
     else
         perl $progtmp $paths
@@ -200,8 +203,9 @@ EOP
     return $exitcode
 }
 
-
-# Handle files and directories
+################################################################################
+# Handler for files and directories
+#
 # If OP is 'stat', then the following applies:
 #   - Variable MAX_MTIME_REMOTE will be set to higest
 #     modification timestamp found amongst remote files/dirs.
@@ -222,7 +226,7 @@ EOP
 # Retcode 10 if anything fails.
 # Retcode 100 for invalid OP.
 # Retcode 255 for pre-requisite or fatal errors
-#
+################################################################################
 handler_file() {
     type rsync 1>/dev/null 2>&1 || {
         print_err "Missing required dependency: rsync"
@@ -268,6 +272,9 @@ handler_file_internal() {
     list_append stdopts --relative
     list_append stdopts --no-implied-dirs
     list_append stdopts --protect-args
+
+    # Setup RSYNC_RSH
+    export RSYNC_RSH="ssh `echo $SSH_OPTS`"
     
     local relative_paths= relative_paths_host= absolute_paths= absolute_paths_host=
     while [ "$1" ]; do
@@ -412,7 +419,50 @@ handler_file_internal() {
     [ "$ERRORS" ] && return 10 || return 0
 }
 
-# Utility functions for working with local and remote DBUS sessions (required for dconf):
+################################################################################
+# SSH control master setup and teardown
+################################################################################
+SSH_CTL_SOCKET="/tmp/ds-$$-%r@%h:%p.sock"   # Per [USER@]HOST master control socket
+SSH_OPTS="-x
+-e
+none"                                       # Newline-separated list of ssh options
+SSH_SETUP_HOSTS=                            # List of all hosts with ssh setup
+
+# Expects <[USER@]HOST> as first argument
+ssh_setup() {
+    type ssh 1>/dev/null 2>&1 || {
+        print_err "Missing required dependency: ssh"
+        print_err "It has to be available somewhere in your PATH."
+        return 255
+    }
+    [ "$1" ] || return 1
+    local host="$1"
+    SSH_OPTS="-x
+-e
+none" # pure newline IFS compatible
+
+    # Try to set up ssh master connection
+    if ! ssh -o ControlPath=$SSH_CTL_SOCKET -O check $host 1>/dev/null 2>&1; then
+        ssh -xNf -e none -o ControlMaster=yes -o ControlPath=$SSH_CTL_SOCKET $host
+        if [ $? -eq 0 ]; then
+            SSH_OPTS="$SSH_OPTS
+-o
+ControlPath=$SSH_CTL_SOCKET" # pure newline IFS compatible
+            SSH_SETUP_HOSTS="$SSH_SETUP_HOSTS $host"
+        fi
+    fi
+}
+ssh_cleanup() {
+    for host in $SSH_SETUP_HOSTS; do
+        ssh -o ControlPath=$SSH_CTL_SOCKET -O exit $host 1>/dev/null 2>&1
+    done
+}
+trap ssh_cleanup EXIT INT TERM
+
+################################################################################
+# Utility functions for working with local and remote DBUS sessions (required
+# for dconf)
+################################################################################
 DBUS_REMOTE_SESSION_PID=
 DBUS_REMOTE_SESSION_ADDRESS=
 dbus_open_remote_session() {
@@ -423,7 +473,7 @@ dbus_open_remote_session() {
     
     tmpfile=`mktemp`
     # Try to obtain address of any running dbus instance on remote host first
-    ssh -x $HOST 'set -e;U=`id -nu`;DCPID=`pgrep -o -u $U dconf-service`;test "$DCPID" -a -f /proc/$DCPID/environ;xargs -0 -n1 -a /proc/$DCPID/environ|grep DBUS_SESSION_BUS_ADDRESS|cut -d= -f2-' > $tmpfile
+    ssh $SSH_OPTS $HOST 'set -e;U=`id -nu`;DCPID=`pgrep -o -u $U dconf-service`;test "$DCPID" -a -f /proc/$DCPID/environ;xargs -0 -n1 -a /proc/$DCPID/environ|grep DBUS_SESSION_BUS_ADDRESS|cut -d= -f2-' > $tmpfile
     addr=`cat $tmpfile`
     if [ "$addr" ]; then
         # found already running remote session bus, use that
@@ -434,7 +484,7 @@ dbus_open_remote_session() {
     fi
 
     # No running dbus session found on remote host, set up our own
-    ssh -x $HOST 'dbus-daemon --session --fork --print-pid --print-address' > $tmpfile
+    ssh $SSH_OPTS $HOST 'dbus-daemon --session --fork --print-pid --print-address' > $tmpfile
     addr=`head -n1 $tmpfile`
     pid=`tail -n1 $tmpfile`
     if [ -z "$addr" ] || [ -z "$pid" ]; then
@@ -452,7 +502,7 @@ dbus_open_remote_session() {
 dbus_close_remote_session() {
     if [ "$DBUS_REMOTE_SESSION_PID" ]; then
         # We have started a remote dbus session ourselves, kill it
-        ssh -x $HOST "kill $DBUS_REMOTE_SESSION_PID 2>/dev/null" || print_warn "dbus_close_remote_session: failed to kill remotely started dbus-daemon with pid $DBUS_REMOTE_SESSION_PID"
+        ssh $SSH_OPTS $HOST "kill $DBUS_REMOTE_SESSION_PID 2>/dev/null" || print_warn "dbus_close_remote_session: failed to kill remotely started dbus-daemon with pid $DBUS_REMOTE_SESSION_PID"
         DBUS_REMOTE_SESSION_PID=
     fi
     DBUS_REMOTE_SESSION_ADDRESS=
@@ -502,7 +552,9 @@ dbus_close_local_session() {
     DBUS_LOCAL_SESSION_ADDRESS=
 }
 
-# Handle dconf trees
+################################################################################
+# Handler for dconf trees
+################################################################################
 handler_dconf() {
     reset_IFS
 
@@ -526,9 +578,6 @@ handler_dconf() {
         tree="$tree/"
     fi
 
-    local sshopts="-x"
-    [ "$GLOPT_COMP" ] && sshopts="$sshopts -C"
-
     case $OP in
         push)
             # Transfer dconf tree to remote host
@@ -542,9 +591,9 @@ handler_dconf() {
             
             if [ "$GLOPT_DRYRUN" ]; then
                 print "handler_dconf: dry run commands:"
-                print "handler_dconf:" "dconf dump $tree | ssh $sshopts $HOST 'DBUS_SESSION_BUS_ADDRESS=$DBUS_REMOTE_SESSION_ADDRESS dconf load $tree'"
+                print "handler_dconf:" "dconf dump $tree | ssh $SSH_OPTS $HOST 'DBUS_SESSION_BUS_ADDRESS=$DBUS_REMOTE_SESSION_ADDRESS dconf load $tree'"
             else
-                dconf dump "$tree" | ssh $sshopts $HOST "DBUS_SESSION_BUS_ADDRESS=$DBUS_REMOTE_SESSION_ADDRESS dconf load $tree"
+                dconf dump "$tree" | ssh $SSH_OPTS $HOST "DBUS_SESSION_BUS_ADDRESS=$DBUS_REMOTE_SESSION_ADDRESS dconf load $tree"
                 if [ $? -ne 0 ]; then
                     print_err "handler_dconf: failed to send data to host $HOST"
                     ERRORS="dconf tree $tree: failed to send data to host $HOST"
@@ -569,9 +618,9 @@ handler_dconf() {
             
             if [ "$GLOPT_DRYRUN" ]; then
                 print "handler_dconf: dry run commands:"
-                print "handler_dconf:" "ssh $sshopts $HOST 'dconf dump $tree'|DBUS_SESSION_BUS_ADDRESS=$DBUS_LOCAL_SESSION_ADDRESS dconf load $tree"
+                print "handler_dconf:" "ssh $SSH_OPTS $HOST 'dconf dump $tree'|DBUS_SESSION_BUS_ADDRESS=$DBUS_LOCAL_SESSION_ADDRESS dconf load $tree"
             else
-                ssh $sshopts $HOST "dconf dump $tree" |DBUS_SESSION_BUS_ADDRESS=$DBUS_LOCAL_SESSION_ADDRESS dconf load "$tree"
+                ssh $SSH_OPTS $HOST "dconf dump $tree" |DBUS_SESSION_BUS_ADDRESS=$DBUS_LOCAL_SESSION_ADDRESS dconf load "$tree"
                 if [ $? -ne 0 ]; then
                     print_err "handler_dconf: failed to retrieve dconf data from host $HOST"
                     ERRORS="dconf tree $tree: failed to retrieve dconf data from host $HOST"
@@ -590,8 +639,10 @@ handler_dconf() {
     esac
 }
 
-# Handle GConf-trees
+###############################
+# Handler for GConf-trees
 # DEPRECATED in favour of dconf
+###############################
 handler_gconf() {
     reset_IFS
 
@@ -611,9 +662,6 @@ handler_gconf() {
         return 1
     fi
 
-    local sshopts="-x"
-    [ "$GLOPT_COMP" ] && sshopts="$sshopts -C"
-
     case $OP in
         push)
             # Transfer GConf tree to remote host
@@ -621,11 +669,11 @@ handler_gconf() {
             if gconftool-2 --dir-exists "$tree"; then
                 if [ "$GLOPT_DRYRUN" ]; then
                     print "handler_gconf: dry run commands:"
-                    print "handler_gconf:" "gconftool-2 --dump $tree | ssh $sshopts $HOST 'gconftool-2 --unload -'"
-                    print "handler_gconf:" "gconftool-2 --dump $tree | ssh $sshopts $HOST 'gconftool-2 --load -; retcode=\$?; killall -HUP gconfd-2 2>/dev/null; exit \$retcode'"
+                    print "handler_gconf:" "gconftool-2 --dump $tree | ssh $SSH_OPTS $HOST 'gconftool-2 --unload -'"
+                    print "handler_gconf:" "gconftool-2 --dump $tree | ssh $SSH_OPTS $HOST 'gconftool-2 --load -; retcode=\$?; killall -HUP gconfd-2 2>/dev/null; exit \$retcode'"
                 else
-                    gconftool-2 --dump $tree | ssh $sshopts $HOST 'gconftool-2 --unload -'
-                    gconftool-2 --dump $tree | ssh $sshopts $HOST "gconftool-2 --load -; retcode=\$?; killall -HUP gconfd-2 2>/dev/null; exit \$retcode"
+                    gconftool-2 --dump $tree | ssh $SSH_OPTS $HOST 'gconftool-2 --unload -'
+                    gconftool-2 --dump $tree | ssh $SSH_OPTS $HOST "gconftool-2 --load -; retcode=\$?; killall -HUP gconfd-2 2>/dev/null; exit \$retcode"
                     if [ $? -ne 0 ]; then
                         print_err "handler_gconf: failed to send data to host $HOST"
                         ERRORS="GConf tree $tree: failed to send data to host $HOST"
@@ -645,16 +693,16 @@ handler_gconf() {
             # Load GConf-tree from remote host to local
             print "Retrieving GConf tree $tree from remote host $HOST .."
 
-            if ssh $sshopts $HOST "gconftool-2 --dir-exists $tree"; then
+            if ssh $SSH_OPTS $HOST "gconftool-2 --dir-exists $tree"; then
                 if [ "$GLOPT_DRYRUN" ]; then
                     print "handler_gconf: dry run commands:"
-                    print "handler_gconf: ssh $sshopts $HOST 'gconftool-2 --dump $tree' > <tmpfile>"
+                    print "handler_gconf: ssh $SSH_OPTS $HOST 'gconftool-2 --dump $tree' > <tmpfile>"
                     print "handler_gconf: gconftool-2 --unload <tmpfile>; gconftool-2 --load <tmpfile>"
                     print "handler_gconf: killall -HUP gconfd-2"
                 else
                     local tmpfile
                     tmpfile=`mktemp`
-                    ssh $sshopts $HOST "gconftool-2 --dump $tree" > $tmpfile
+                    ssh $SSH_OPTS $HOST "gconftool-2 --dump $tree" > $tmpfile
                     if [ $? -ne 0 ]; then
                         print_err "handler_gconf: failed to retrieve GConf data from host $HOST"
                         ERRORS="GConf tree $tree: failed to retrieve data"
@@ -690,6 +738,10 @@ handler_gconf() {
 # Execute command stat
 do_command_stat() {
     [ -z "$CURRENT_ITEM" ] && return 1
+
+    # Setup SSH, possibly creating control master connection
+    ssh_setup "$HOST"
+        
     # Do sync status for files/dirs
     if property_values_exist ITEM $CURRENT_ITEM FILES; then
         local IFS
@@ -746,6 +798,9 @@ do_command_sync() {
     item="$CURRENT_ITEM"
     [ -z "$item" ] && return 1
 
+    # Setup SSH, possibly creating control master connection
+    ssh_setup "$HOST"
+        
     print
     if item_flag_effective_value $item always_ask || [ "$GLOPT_INT" ]; then
         if [ $OP = push ] && ! ask_ynq "Push item $item to host $HOST ?"; then
@@ -894,7 +949,7 @@ ask_kill_local_remote() {
     local pids= pid
     while [ "$1" ]; do
         pids=`pgrep -f -U $USER "$1"` && { for pid in $pids; do [ $pid -ne $$ ] && local_pids="$local_pids $pid"; done; }
-        pids=`ssh -x $HOST "pgrep -f -U $username '$1'"` && { for pid in $pids; do remote_pids="$remote_pids $pid"; done; }
+        pids=`ssh $SSH_OPTS $HOST "pgrep -f -U $username '$1'"` && { for pid in $pids; do remote_pids="$remote_pids $pid"; done; }
         shift
     done
 
@@ -918,15 +973,15 @@ ask_kill_local_remote() {
 
     if [ "$remote_pids" ]; then
         print_warn "Processes associated with item $CURRENT_ITEM found running remotely:"
-        ssh -x $HOST "ps -p '$remote_pids' -o pid,cmd"
+        ssh $SSH_OPTS $HOST "ps -p '$remote_pids' -o pid,cmd"
         print
         if [ "$NO_KILL_CONFIRMATION" ]; then
             print "Killing now"
-            ssh -x $HOST kill $remote_pids && sleep 3 || ask_abort "Failed to kill remote processes associated with item $CURRENT_ITEM"
+            ssh $SSH_OPTS $HOST kill $remote_pids && sleep 3 || ask_abort "Failed to kill remote processes associated with item $CURRENT_ITEM"
         else
             if ask_ynq "Kill them before sync ?"; then
                 print "Killing now"
-                ssh -x $HOST kill $remote_pids && sleep 3 || ask_abort "Failed to kill remote processes associated with item $CURRENT_ITEM"
+                ssh $SSH_OPTS $HOST kill $remote_pids && sleep 3 || ask_abort "Failed to kill remote processes associated with item $CURRENT_ITEM"
             fi
         fi
     fi
@@ -945,7 +1000,7 @@ log_hook() {
 
             # Update remote log file
             echo "$datestamp  > REMOTE_PUSH ${CURRENT_GROUP:+group $CURRENT_GROUP }item $CURRENT_ITEM from host `hostname`$message" |\
-                 ssh -x $HOST "cat - >> $LOG_FILE"
+                 ssh $SSH_OPTS $HOST "cat - >> $LOG_FILE"
             if [ $? -ne 0 ]; then
                 print_warn "Failed to update remote log file"
             fi
@@ -956,7 +1011,7 @@ log_hook() {
 
             # Update remote log file
             echo "$datestamp <  REMOTE_FETCH ${CURRENT_GROUP:+group $CURRENT_GROUP }item $CURRENT_ITEM from host `hostname`$message" |\
-                 ssh -x $HOST "cat - >> $LOG_FILE"
+                 ssh $SSH_OPTS $HOST "cat - >> $LOG_FILE"
             if [ $? -ne 0 ]; then
                 print_warn "Failed to update remote log file"
             fi
@@ -1022,11 +1077,14 @@ do_command_log() {
         local lastops_tmpfile
         lastops_tmpfile=`mktemp`
         if [ "$HOST" ]; then
+            # Setup SSH, possibly creating control master connection
+            ssh_setup "$HOST"
+
             print "Last operation per configured item or group in log on remote host: $HOST"
             print
             local tmpfile
             tmpfile=`mktemp`
-            ssh -x $HOST "cat $LOG_FILE" > $tmpfile
+            ssh $SSH_OPTS $HOST "cat $LOG_FILE" > $tmpfile
             case $? in # FIXME: duplicated error handling code (look further down).
                 0|1) : ;; # OK
                 2)
@@ -1066,13 +1124,16 @@ do_command_log() {
     if [ "$LOG_CLEAR" ]; then
         # Clear logfile requested
         if [ "$HOST" ]; then
+            # Setup SSH, possibly creating control master connection
+            ssh_setup "$HOST"
+
             print "Clearing log file ~/$LOG_FILE on remote host $HOST .."
-            ssh -x $HOST 'test -f $LOG_FILE'
+            ssh $SSH_OPTS $HOST 'test -f $LOG_FILE'
             if [ $? -ne 0 ]; then
                 print_err "Log file not found on remote host $HOST."
                 return 1
             else
-                ssh -x $HOST "echo -n > $LOG_FILE"
+                ssh $SSH_OPTS $HOST "echo -n > $LOG_FILE"
                 [ $? -ne 0 ] && print_err "Failed to clear log file on remote host $HOST" && return 1
                 return 0
             fi
@@ -1091,8 +1152,11 @@ do_command_log() {
     local tmpfile=
     local logfile="$HOME/$LOG_FILE"
     if [ "$HOST" ]; then
+        # Setup SSH, possibly creating control master connection
+        ssh_setup "$HOST"
+
         tmpfile=`mktemp`
-        ssh -x $HOST cat $LOG_FILE > $tmpfile
+        ssh $SSH_OPTS $HOST cat $LOG_FILE > $tmpfile
         case $? in
             0|1) : ;; # OK
             2)
@@ -1131,9 +1195,12 @@ do_command_log() {
     return 0
 }
 
+################################################################################
+# List management functions
 # Bourne-shell lacks support for arrays.
 # These functions support management of property values in a single variable.
 # List elements/values are always separated by newlines.
+################################################################################
 _ORIG_IFS="$IFS"
 reset_IFS() {
     IFS="$_ORIG_IFS"
@@ -1212,9 +1279,11 @@ list_size() {
     for element in $current_list; do count=$((count+1)); done
     LIST_RETVAL=$count
 }
-# End of internal list utility functions
 
-# Functions for storing parsed configuration values:
+
+####################################################
+# Functions for managing parsed configuration values
+####################################################
 add_item() {
     eval "[ \"\$CONF_ITEM_$1\" ]" && return 1 # item already registered ..
     eval "CONF_ITEM_$1=1" # register
@@ -1325,14 +1394,6 @@ item_flag_effective_value() {
     fi
 }
 
-unset CURRENT_ITEM
-CONF_GLOBAL_DEFAULT_HOST=$DS_DEFAULT_HOST
-set_global_flag_true  target_deletes
-set_global_flag_true  force_update
-set_global_flag_false always_ask
-set_global_flag_true  ask_before_kill
-set_global_flag_false max_mtime_check
-
 # Word tokenizer for config file. Tokens are separated by newlines, and
 # syntactically significant newlines are represented by token '<<<EoS>>>'
 # (EndofStanza). Supports quoted words, quote-escaping and comment removal.
@@ -1413,13 +1474,14 @@ parse_configuration() {
         case $keyword in
             default_host)
                 if [ "$CURRENT_ITEM" ]; then
-                    print_err "Config: global option 'default_host' cannot be put in item context"
+                    print_err "Config: global option '$keyword' cannot be put in item context"
                     return 1
                 fi
                 if [ -z "$firstval" ]; then
-                    print_err "Config: global option 'default_host' requires a value"
+                    print_err "Config: global option '$keyword' requires a value"
                     return 1
                 fi
+
                 CONF_GLOBAL_DEFAULT_HOST=$firstval
                 ;;
                 
@@ -1579,8 +1641,8 @@ parse_configuration() {
 
 do_command_conf_example() {
     cat <<EOF
-# Example ~/$CONFIG_FILE
-# VERSION=5
+# Complete example of ~/$CONFIG_FILE
+# VERSION=6
 #
 
 # Set the default host / sync partner:
@@ -1647,8 +1709,9 @@ item SecureFS
      cond '! grep -q securefs /proc/mounts || { echo Warning: SecureFS is mounted locally \!; false; }'
 
      # HOST variable will always be set to remote host of sync
+     # SSH_OPTS will be set to options for ssh, which includes master control socket info
      # (so in this case we can also check if it is mounted remotely):
-     cond '! ssh \$HOST grep -q securefs /proc/mounts || { echo Warning: SecureFS is mounted on remote host \$HOST \!; false; }'
+     cond '! ssh \$SSH_OPTS \$HOST grep -q securefs /proc/mounts || { echo Warning: SecureFS is mounted on remote host \$HOST \!; false; }'
 
      # Need rsync checksum-comparison for this file (timestamp is never updated, even if content changes), also be verbose:
      rsync_options -c -vv
@@ -2317,6 +2380,9 @@ version() {
     exit 0
 }
 
+##############################
+# Global variables and options
+##############################
 GLOPT_YES=
 GLOPT_INT=
 GLOPT_VERB=
@@ -2343,6 +2409,14 @@ while getopts "cYivznluVhH" opt; do
 done
 shift `expr $OPTIND - 1`
 
+unset CURRENT_ITEM
+CONF_GLOBAL_DEFAULT_HOST=$DS_DEFAULT_HOST
+set_global_flag_true  target_deletes
+set_global_flag_true  force_update
+set_global_flag_false always_ask
+set_global_flag_true  ask_before_kill
+set_global_flag_false max_mtime_check
+
 COMMAND=
 SELECTED_ITEMS=
 HOST=
@@ -2358,7 +2432,7 @@ LOG_LASTOP=
     exit 1
 }
 
-# Parse and validate command
+# Parse, validate and execute command line
 [ -z "$1" ] && usage
 COMMAND=$1
 shift
@@ -2376,12 +2450,6 @@ case "$COMMAND" in
             exit 2
         fi
 
-        type ssh 1>/dev/null 2>&1 || {
-            print_err "Missing required dependency: ssh"
-            print_err "It has to be available somewhere in your PATH."
-            return 255
-        }
-        
         if [ "$1" ]; then
             while [ "$1" ]; do
                 case $1 in
