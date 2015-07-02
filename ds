@@ -36,14 +36,14 @@
 # TODO better documentation
 # TODO better logging of groups
 # TODO clean up IFS-handling.
-# TODO improve command line user experience by allow options anywhere.
+# TODO improve command line completion to allow options anywhere
 # TODO add "dist" command to push to multiple hosts in one go:
 #      ds dist hostA [hostB ..] [items FOO BAR ..]
 # TODO Use rsync '--ignore-missing-args' option, but only when local/remote
 #      rsync version is >= 3.1.0.
 
 # Global constants and default values.
-readonly VERSION=1.2.0
+readonly VERSION=1.3
 readonly LOG_FILE=".ds.log"     # always relative to $HOME
 readonly CONFIG_FILE=".ds.conf" # always relative to $HOME
 
@@ -1934,7 +1934,7 @@ EOF
 do_command_conf_items() {
     if have_items; then
         if [ "$1" ]; then
-            # print details for each item or group
+            # Print details for each item or group
             local x
             for x in $*; do
                 if is_group $x; then
@@ -2267,23 +2267,32 @@ GLOPT_COLORS=
 GLOPT_DRYRUN=
 GLOPT_NOLOG=
 GLOPT_ONLY_UPDATE=
-while getopts "cYivznluVhH" opt; do
-    case $opt in
-        c) GLOPT_COLORS=1 ;;
-        Y) GLOPT_YES=1 ;;
-        i) GLOPT_INT=1 ;;
-        v) GLOPT_VERB=1 ;;
-        z) GLOPT_COMP=1 ;;
-        n) GLOPT_DRYRUN=1 ;;
-        l) GLOPT_NOLOG=1 ;;
-        u) GLOPT_ONLY_UPDATE=1 ;;
-        V) version ;;
-        h) usage ;;
-        H) usage detailed ;;
-        ?) print_err "Invalid option: '$1'"; usage ;;
-    esac
+cmdargs=
+while [ "$1" ]; do
+    while getopts ":cYivznluVhH" opt; do
+        case $opt in
+            c) GLOPT_COLORS=1 ;;
+            Y) GLOPT_YES=1 ;;
+            i) GLOPT_INT=1 ;;
+            v) GLOPT_VERB=1 ;;
+            z) GLOPT_COMP=1 ;;
+            n) GLOPT_DRYRUN=1 ;;
+            l) GLOPT_NOLOG=1 ;;
+            u) GLOPT_ONLY_UPDATE=1 ;;
+            V) version ;;
+            h) usage ;;
+            H) usage detailed ;;
+            \?) print_err "Invalid option: '$1'"; usage ;;
+        esac
+    done
+    shift $((OPTIND-1))
+    OPTIND=1
+    [ $# -gt 0 ] && list_append cmdargs "$1" && shift
 done
-shift `expr $OPTIND - 1`
+list_elements cmdargs
+newline_IFS
+set -- $LIST_RETVAL
+reset_IFS
 
 unset CURRENT_ITEM
 CONF_GLOBAL_DEFAULT_HOST=$DS_DEFAULT_HOST
