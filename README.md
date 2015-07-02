@@ -13,7 +13,7 @@ then be pushed or fetched to/from remote hosts with ease. It is meant to be used
 interactively and has support for generating Bash-compatible command line
 auto-completion code. Ds itself is written in POSIX compliant plain Bourne shell
 and is compatible with for instance dash, which runs much faster than standard
-GNU bash. Dash also happens to be the default `/bin/sh' implementation on
+GNU bash. Dash also happens to be the default `/bin/sh` implementation on
 Ubuntu/Debian.
 
 The only documentation currently available is the built-in help:
@@ -45,14 +45,14 @@ See git history.
 Installation
 ------------
 
-There is no installation necessary. Just copy the `ds' script to somewhere in
-your PATH.
+There is no installation necessary. Just copy the `ds` script to somewhere in
+your `PATH`.
 
 
 Initial config
 --------------
 
-Simple example of initial config which can be put into ~/.ds.conf:
+Simple example of initial config which can be put into `~/.ds.conf`:
 
      item confmisc
        files .screenrc .inputrc .nanorc
