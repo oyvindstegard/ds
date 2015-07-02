@@ -36,6 +36,7 @@
 # TODO better documentation
 # TODO better logging of groups
 # TODO clean up IFS-handling.
+# TODO improve command line user experience by allow options anywhere.
 # TODO add "dist" command to push to multiple hosts in one go:
 #      ds dist hostA [hostB ..] [items FOO BAR ..]
 # TODO Use rsync '--ignore-missing-args' option, but only when local/remote
