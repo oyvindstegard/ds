@@ -27,6 +27,15 @@ To get a rather elaborte configuration file example, issue:
 Changelog
 ---------
 
+### Version 1.3.0, 2015-07-04 ###
+
+- Allow options to occur anywhere on command line. This relaxes command line
+syntax and allows to conveniently append options at the end.
+
+- Massive simplification of generated Bash autocompletion code. Easier to read
+  and extend. A lot of unnecessary validation was removed.
+
+
 ### Version 1.2.0, 2015-07-02 ###
 
 - Added support for ssh master connection sharing. This will reduce latency for
