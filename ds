@@ -1649,14 +1649,20 @@ _ds_completion_hosts() {
     # Use _known_hosts completion from standard Bash completion package if exists
     if [ "$(type -t _known_hosts)" = function ]; then
         _known_hosts
-    else
+    elif [ -f ~/.ssh/config ]; then
         # Fall back to simplistic parsing of ~/.ssh/config ..
-        local sshosts=()
-        if [ -f ~/.ssh/config ]; then
-            sshosts=($(awk '/^[ 	]*[Hh]ost[ 	]/ { for (i=2; i<=NF; i++)
-                                 { if (!match($i,"[][*?!]")) printf("%s ",$i);}}' < ~/.ssh/config))
+        local host sshosts=() prefix=
+        if [ "${cur/@}" != "$cur" ]; then
+            prefix="${cur%@*}@"
         fi
+        for host in $(awk '/^[ 	]*[Hh]ost[ 	]/ { for (i=2; i<=NF; i++)
+                                 { if (!match($i,"[][*?!]")) printf("%s ",$i);}}' < ~/.ssh/config)
+        do
+            sshosts+=(${prefix}${host})
+        done
         COMPREPLY=($(compgen -W "${sshosts[*]}" -- $cur))
+    else
+        COMPREPLY=()
     fi
 }
 _ds_completion() {
