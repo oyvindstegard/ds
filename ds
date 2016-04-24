@@ -1740,7 +1740,7 @@ _ds_completion() {
                 elif [ "$prev" = match ]; then
                     COMPREPLY=($(compgen -W "$($__DS_CMD __compitems)" -- $cur))
                 else
-                    COMPREPLY+=($(compgen -W "match clear lastop remote" -- $cur))
+                    COMPREPLY+=($(compgen -W "all match clear lastop remote" -- $cur))
                 fi
             ;;
         esac
