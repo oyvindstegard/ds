@@ -272,6 +272,11 @@ handler_file_internal() {
     list_append stdopts --relative
     list_append stdopts --no-implied-dirs
     list_append stdopts --protect-args
+    if [ "$OP" = stat ] && echo "$extraopts"|grep -q -- --ignore-missing-args; then
+        # Use rsync option --ignore-missing-args for stat as well, if specified as extra option
+        # (Only available in recent-ish rsync versions)
+        list_append stdopts --ignore-missing-args
+    fi
 
     # Setup RSYNC_RSH
     export RSYNC_RSH="ssh `echo $SSH_OPTS`"
