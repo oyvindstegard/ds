@@ -42,7 +42,7 @@
 #      rsync version is >= 3.1.0.
 
 # Global constants and default values.
-readonly VERSION=1.3.2
+readonly VERSION=1.3.3
 readonly LOG_FILE=".ds.log"     # always relative to $HOME
 readonly CONFIG_FILE=".ds.conf" # always relative to $HOME
 
@@ -1732,7 +1732,11 @@ _ds_completion() {
                 fi
             ;;
             conf)
-                COMPREPLY+=($(compgen -W "$($__DS_CMD __compitems $pargs) example items edit" -- $cur))
+                if [ "$prev" = edit ]; then
+                    COMPREPLY+=($(compgen -W "$($__DS_CMD __compitems $pargs)" -- $cur))
+                else
+                    COMPREPLY+=($(compgen -W "$($__DS_CMD __compitems $pargs) example items edit" -- $cur))
+                fi
             ;;
             log)
                 if [ "$prev" = remote ]; then
@@ -1800,7 +1804,10 @@ do_command_conf_edit() {
         return 1
     }
     cp "$HOME/$CONFIG_FILE" "$tmpfile"
-    ${EDITOR:-vi} "$tmpfile" || {
+
+    local line
+    line=`grep -n -m1 -E "\s*item\s+$1" "$tmpfile"|cut -d: -f1`
+    ${EDITOR:-vi} +${line:-1} "$tmpfile" || {
         print_err "Editor failed."
         rm -f "$tmpfile"
         return 1
@@ -1839,7 +1846,7 @@ do_command_conf_edit() {
 conf_print_item() {
     local item
     item="$1"
-    
+
     local IFS
     IFS='
 '
@@ -1898,7 +1905,7 @@ conf_print_item() {
             itemopts="${itemopts:+$itemopts, }always_ask false"
         fi
     fi
-    
+
     if item_has_flag $item max_mtime_check; then
         if item_flag_value $item max_mtime_check; then
             itemopts="${itemopts:+$itemopts, }max_mtime_check true"
@@ -2313,14 +2320,15 @@ case "$COMMAND" in
                 exit 255
             fi
         fi
-        
+
         if [ "$1" ]; then
             if [ "$1" = example ]; then
                 do_command_conf_example
             elif [ "$1" = items ]; then
                 do_command_conf_items
             elif [ "$1" = edit ]; then
-                do_command_conf_edit
+                shift
+                do_command_conf_edit "$@"
             else
                # Assume args are item or group names to be displayed
                 do_command_conf_items "$@"
@@ -2329,7 +2337,7 @@ case "$COMMAND" in
             do_command_conf
         fi
         ;;
-        
+
     log)
         parse_configuration "$HOME/$CONFIG_FILE"
         if [ $? -ne 0 ]; then
