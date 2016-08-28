@@ -31,18 +31,16 @@
 # Documentation: ds -H
 #                ds conf example
 #
-# Bugs can be reported to author: Øyvind Stegard <oyvind.stegard@ifi.uio.no>
+# Bugs can be reported to author: Øyvind Stegard <oyvind@stegard.net>
 #
 # TODO better documentation
 # TODO better logging of groups
 # TODO clean up IFS-handling.
-# TODO add "dist" command to push to multiple hosts in one go:
-#      ds dist hostA [hostB ..] [items FOO BAR ..]
 # TODO Use rsync '--ignore-missing-args' option, but only when local/remote
 #      rsync version is >= 3.1.0.
 
 # Global constants and default values.
-readonly VERSION=1.3.3
+readonly VERSION=1.3.4
 readonly LOG_FILE=".ds.log"     # always relative to $HOME
 readonly CONFIG_FILE=".ds.conf" # always relative to $HOME
 
@@ -1336,9 +1334,9 @@ token_stream() {
 parse_is_flag_arg_true() {
     case $1 in
         "") return 0 ;;
-        [Yy]es | YES | 1 | [tT]rue | TRUE | [Oo]n | ON) return 0 ;;
+        [Yy][eE][sS] | 1 | [tT][rR][uU][eE] | [oO][nN] ) return 0 ;;
+        *) return 1 ;;
     esac
-    return 1
 }
 
 ################################################################################
@@ -1989,17 +1987,19 @@ usage() {
     print
     print "Commands:"
     print_cyan -n "push  "
-    print "[to [USER@]HOST] [ITEM1 ITEM2 GROUP3 [..]]"
-    print "      Synchronize by pushing items to remote host."
+    print "[to [USER@]HOST,..] [ITEM1 ITEM2 GROUP3 [..]]"
+    print "      Synchronize by pushing items to remote host(s)."
     print
     print_cyan -n "fetch "
     print "[from [USER@]HOST] [ITEM1 ITEM2 GROUP3 [..]]"
-    print "      Synchronize by fetching items from remote host."
+    print "      Synchronize by fetching items from a remote host."
     print
     if [ "$1" ]; then
         print -n "      If no host is specified for "; print_cyan -n push; print -n " or "; print_cyan -n fetch; 
         print " the configured default-"
         print "      host will be used."
+        print -n "      For "; print_cyan -n push; print -n " or "; print_cyan -n stat
+        print ", multiple hosts may be specified as a comma separated list."
         print -n "      If no items are specified for "; print_cyan -n push; print -n " or "; print_cyan -n fetch
         print ", then all items in the 'default' group are processed."
         print "      Specified item or group names are matched case-insensitively and you can use simple"
@@ -2010,7 +2010,7 @@ usage() {
         print "      This implies two important things:"
         print "      1) If a file has been deleted from a directory tree at the source, it will"
         print "         also be deleted at the target."
-        print "      2) Even files that are newer at the target will be update from source files."
+        print "      2) Even files that are newer at the target will be updated from source files."
         print
         print "      This behaviour ensures consistent/identical data on both ends after"
         print "      a sync, which is suitable for application configuration directories, etc."
@@ -2037,7 +2037,7 @@ usage() {
     fi
     print
     print_cyan -n "stat  "
-    print "ITEM1 ITEM2 GROUP3 [with [USER@]HOST]"
+    print "ITEM1 ITEM2 GROUP3 [with [USER@]HOST,..]"
     print "      Show a simple synchronization status for each item with remote host."
     if [ "$1" ]; then
         print "      If HOST is omitted, then the default sync partner host will be used."
@@ -2168,53 +2168,64 @@ case "$COMMAND" in
             exit 2
         fi
 
-        if [ "$1" ]; then
-            while [ "$1" ]; do
-                case $1 in
-                    to|from)
-                        if { [ "$1" = "to" ] || [ "$1" = "TO" ] || [ "$1" = "To" ]; } && [ "$COMMAND" = fetch ]; then
-                            print_err "Cannot \"fetch to\" a host, did you mean \"fetch from ..\" ?"
-                            usage
-                        fi
+        hosts=
+        while [ "$1" ]; do
+            case $1 in
+                to|from)
+                    if { [ "$1" = "to" ] || [ "$1" = "TO" ] || [ "$1" = "To" ]; } && [ "$COMMAND" = fetch ]; then
+                        print_err "Cannot \"fetch to\" a host, did you mean \"fetch from ..\" ?"
+                        usage
+                    fi
 
-                        if { [ "$1" = "from" ] || [ "$1" = "FROM" ] || [ "$1" = "From" ]; } && [ "$COMMAND" = push ]; then
-                            print_err "Cannot \"push from\" a host, did you mean \"push to ..\" ?"
-                            usage
-                        fi
-                        if [ -z "$2" ]; then
-                            print_err "No [USER@]HOST specified after 'from' or 'to'."
-                            usage
-                        fi
-                        HOST="$2"
-                        shift
-                        ;;
-                    with)
-                        if [ $COMMAND != stat ]; then
-                            print_err "Keyword 'with' can only be used with stat command."
-                            usage
-                        fi
-                        if [ -z "$2" ]; then
-                            print_err "No [USER@]HOST specified after 'with'."
-                            usage
-                        fi
-                        HOST="$2"
-                        shift
-                        ;;
-                    *)
-                        SELECTED_ITEMS="$SELECTED_ITEMS $1"
-                        ;;
-                esac
-                shift
-            done
-        fi
+                    if { [ "$1" = "from" ] || [ "$1" = "FROM" ] || [ "$1" = "From" ]; } && [ "$COMMAND" = push ]; then
+                        print_err "Cannot \"push from\" a host, did you mean \"push to ..\" ?"
+                        usage
+                    fi
+                    if [ -z "$2" ]; then
+                        print_err "No [USER@]HOST specified after 'from' or 'to'."
+                        usage
+                    fi
+                    for host in `echo $2|tr , \ `; do
+                        list_append hosts $host
+                    done
+                    shift
+                    ;;
+                with)
+                    if [ $COMMAND != stat ]; then
+                        print_err "Keyword 'with' can only be used with stat command."
+                        usage
+                    fi
+                    if [ -z "$2" ]; then
+                        print_err "No [USER@]HOST specified after 'with'."
+                        usage
+                    fi
+                    for host in `echo $2|tr , \ `; do
+                        list_append hosts $host
+                    done
+                    shift
+                    ;;
+                *)
+                    SELECTED_ITEMS="$SELECTED_ITEMS $1"
+                    ;;
+            esac
+            shift
+        done
 
-        if [ -z "$HOST" ]; then
+        list_size hosts
+        num_hosts=$LIST_RETVAL
+        if [ $num_hosts -eq 0 ]; then
             if [ -z "$CONF_GLOBAL_DEFAULT_HOST" ]; then
                 print_err "No [USER@]HOST specified and no default host configured."
                 usage
             else
-                HOST=$CONF_GLOBAL_DEFAULT_HOST
+                list_append hosts $CONF_GLOBAL_DEFAULT_HOST
+                num_hosts=1
             fi
+        fi
+
+        if [ $num_hosts -gt 1 ] && [ $COMMAND = fetch ]; then
+            print_err "Multiple hosts not allowed for 'fetch' command."
+            exit 2
         fi
 
         if [ -z "$SELECTED_ITEMS" ]; then
@@ -2260,9 +2271,9 @@ case "$COMMAND" in
         fi
         
         if [ $COMMAND = stat ]; then
-            print "Status with remote host: $HOST"
+            print "Status with remote host(s): " $hosts
         else
-            print "Remote host: $HOST"
+            print "Remote host(s): " $hosts
         fi
         print
         print "Selected items and groups: "
@@ -2285,15 +2296,31 @@ case "$COMMAND" in
             print "Dry run only"
         fi
 
-        CURRENT_GROUP=
-        CURRENT_ITEM=
         OP=$COMMAND
-        for selection in $selections; do
-            if is_group $selection; then
-                CURRENT_GROUP=$selection
-                for item in `list_group_items $selection`; do
-                    CURRENT_ITEM=$item
-                    print 
+        for HOST in $hosts; do
+            if [ $num_hosts -gt 1 ]; then
+                print "Remote host: $HOST"
+            fi
+            CURRENT_GROUP=
+            CURRENT_ITEM=
+            for selection in $selections; do
+                if is_group $selection; then
+                    CURRENT_GROUP=$selection
+                    for item in `list_group_items $selection`; do
+                        CURRENT_ITEM=$item
+                        print 
+                        print -n "Item ";print_cyan $CURRENT_ITEM
+                        if [ $COMMAND = stat ]; then
+                            do_command_stat
+                        else
+                            do_command_sync
+                        fi
+                        print
+                    done
+                else
+                    CURRENT_GROUP=
+                    CURRENT_ITEM=$selection
+                    print
                     print -n "Item ";print_cyan $CURRENT_ITEM
                     if [ $COMMAND = stat ]; then
                         do_command_stat
@@ -2301,19 +2328,8 @@ case "$COMMAND" in
                         do_command_sync
                     fi
                     print
-                done
-            else
-                CURRENT_GROUP=
-                CURRENT_ITEM=$selection
-                print
-                print -n "Item ";print_cyan $CURRENT_ITEM
-                if [ $COMMAND = stat ]; then
-                    do_command_stat
-                else
-                    do_command_sync
                 fi
-                print
-            fi
+            done
         done
         ;;
 
