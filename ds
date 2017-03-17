@@ -160,15 +160,15 @@ my $mtime_newest = 0;
 my $path_newest = "";
 sub traverse {
     my $path = $_[0];
-    my @stats = stat($path);
-    if (@stats) {
-        my $mtime = $stats[9];
+    my @s = lstat($path) or return;
+    if (-f _ || -d _ || -l _) {
+        my $mtime = $s[9];
         if ($mtime > $mtime_newest) {
             $mtime_newest = $mtime;
             $path_newest = $path;
         }
     }
-    if (-d "$path" && !(-l "$path")) {
+    if (-d _ && !(-l _)) {
         my $DH;
         opendir($DH, $path) or return;
         while (defined (my $entry = readdir($DH))) {
@@ -179,6 +179,7 @@ sub traverse {
     }
 }
 foreach my $path (@ARGV) {
+    $path =~ s|([^/])/+$|\1|;
     &traverse($path);
 }
 if ($mtime_newest) {
