@@ -722,7 +722,18 @@ do_command_sync() {
         fi
     fi
 
-    # Do preconditions first
+    # Do any kills
+    unset NO_KILL_CONFIRMATION
+    if property_values_exist ITEM $item KILLS; then
+        if ! item_flag_effective_value $item ask_before_kill; then
+            NO_KILL_CONFIRMATION=1
+        fi
+        newline_IFS
+        ask_kill_local_remote `list_property_values ITEM $item KILLS`
+        reset_IFS
+    fi
+
+    # Do preconditions
     if property_values_exist ITEM $item CONDS; then
         local cond
         local IFS
@@ -741,17 +752,6 @@ do_command_sync() {
                 # Continue evaluating the rest of the pre-conditions, anyway ..
             fi
         done
-    fi
-
-    # Do any kills
-    unset NO_KILL_CONFIRMATION
-    if property_values_exist ITEM $item KILLS; then
-        if ! item_flag_effective_value $item ask_before_kill; then
-            NO_KILL_CONFIRMATION=1
-        fi
-        newline_IFS
-        ask_kill_local_remote `list_property_values ITEM $item KILLS`
-        reset_IFS
     fi
 
     # Set any special rsync options for the item
