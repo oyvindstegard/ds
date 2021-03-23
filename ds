@@ -40,7 +40,7 @@
 #      rsync version is >= 3.1.0.
 
 # Global constants and default values.
-readonly VERSION=1.3.5
+readonly VERSION=1.3.6
 readonly LOG_FILE=".ds.log"     # always relative to $HOME
 readonly CONFIG_FILE=".ds.conf" # always relative to $HOME
 
@@ -892,10 +892,10 @@ log_hook() {
     [ "$message" ] && message=", $message"
     case $OP in
         push)
-            echo "$datestamp <  PUSH ${CURRENT_GROUP:+group $CURRENT_GROUP }item $CURRENT_ITEM to host $HOST$message" >> "$HOME/$LOG_FILE"
+            echo "$datestamp (`hostname`)-->  PUSH ${CURRENT_GROUP:+group $CURRENT_GROUP }item $CURRENT_ITEM to host $HOST$message" >> "$HOME/$LOG_FILE"
 
             # Update remote log file
-            echo "$datestamp  > REMOTE_PUSH ${CURRENT_GROUP:+group $CURRENT_GROUP }item $CURRENT_ITEM from host `hostname`$message" |\
+            echo "$datestamp ($HOST)<--  REMOTE_PUSH ${CURRENT_GROUP:+group $CURRENT_GROUP }item $CURRENT_ITEM from host `hostname`$message" |\
                  ssh $SSH_OPTS $HOST "cat - >> $LOG_FILE"
             if [ $? -ne 0 ]; then
                 print_warn "Failed to update remote log file"
@@ -903,10 +903,10 @@ log_hook() {
             ;;
 
         fetch)
-            echo "$datestamp  > FETCH ${CURRENT_GROUP:+group $CURRENT_GROUP }item $CURRENT_ITEM from host $HOST$message" >> "$HOME/$LOG_FILE"
+            echo "$datestamp (`hostname`)<--  FETCH ${CURRENT_GROUP:+group $CURRENT_GROUP }item $CURRENT_ITEM from host $HOST$message" >> "$HOME/$LOG_FILE"
 
             # Update remote log file
-            echo "$datestamp <  REMOTE_FETCH ${CURRENT_GROUP:+group $CURRENT_GROUP }item $CURRENT_ITEM from host `hostname`$message" |\
+            echo "$datestamp ($HOST)-->  REMOTE_FETCH ${CURRENT_GROUP:+group $CURRENT_GROUP }item $CURRENT_ITEM from host `hostname`$message" |\
                  ssh $SSH_OPTS $HOST "cat - >> $LOG_FILE"
             if [ $? -ne 0 ]; then
                 print_warn "Failed to update remote log file"
