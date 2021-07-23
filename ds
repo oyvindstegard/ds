@@ -788,13 +788,15 @@ do_command_sync() {
         fi
         reset_IFS
         OP=$oldOP
-
-        if [ $MAX_MTIME_LOCAL -gt $MAX_MTIME_REMOTE ] && [ $OP = fetch ]; then
-            print_warn "Most recently modified path found locally: $MAX_MTIME_LOCAL_PATH, modified `LC_TIME=C date -d @$MAX_MTIME_LOCAL`"
-            ask_ynq "Do you want to skip fetching from remote ?" && return 0
-        elif [ $MAX_MTIME_REMOTE -gt $MAX_MTIME_LOCAL ] && [ $OP = push ]; then
-            print_warn "Most recently modified path found remotely: $HOST:$MAX_MTIME_REMOTE_PATH, modified `LC_TIME=C date -d @$MAX_MTIME_REMOTE`"
-            ask_ynq "Do you want to skip pushing to remote ?" && return 0
+        
+        if [ $retcode -eq 0 ]; then
+            if [ $MAX_MTIME_LOCAL -gt $MAX_MTIME_REMOTE ] && [ $OP = fetch ]; then
+                print_warn "Most recently modified path found locally: $MAX_MTIME_LOCAL_PATH, modified `LC_TIME=C date -d @$MAX_MTIME_LOCAL`"
+                ask_ynq "Do you want to skip fetching from remote ?" && return 0
+            elif [ $MAX_MTIME_REMOTE -gt $MAX_MTIME_LOCAL ] && [ $OP = push ]; then
+                print_warn "Most recently modified path found remotely: $HOST:$MAX_MTIME_REMOTE_PATH, modified `LC_TIME=C date -d @$MAX_MTIME_REMOTE`"
+                ask_ynq "Do you want to skip pushing to remote ?" && return 0
+            fi
         fi
     fi
     
